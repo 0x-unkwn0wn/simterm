@@ -6,6 +6,7 @@
 
 mod app;
 mod audio;
+mod autoplay;
 mod command;
 mod completion;
 mod effects;
@@ -18,7 +19,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -34,12 +37,13 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 const DEFAULT_CAMPAIGN: &str = "examples/sample_campaign";
 
 fn main() -> ExitCode {
-    let (path, mode, no_music) = match parse_args() {
+    let (path, mode, no_music, autoplay) = match parse_args() {
         Args::Run {
             path,
             mode,
             no_music,
-        } => (path, mode, no_music),
+            autoplay,
+        } => (path, mode, no_music, autoplay),
         Args::Help => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -90,7 +94,7 @@ fn main() -> ExitCode {
             } else {
                 audio::Audio::try_new(root)
             };
-            if let Err(err) = run_game(campaign, audio) {
+            if let Err(err) = run_game(campaign, audio, autoplay) {
                 eprintln!("Error en la ejecución: {err}");
                 return ExitCode::FAILURE;
             }
@@ -159,17 +163,20 @@ enum Args {
         path: PathBuf,
         mode: Mode,
         no_music: bool,
+        autoplay: Option<autoplay::AutoplayConfig>,
     },
     Help,
 }
 
 /// Parseo de argumentos mínimo (sin dependencias externas):
-///   simterm [--campaign|-c <ruta>] [--check | --doctor] [--no-music] [ruta]
+///   simterm [--campaign|-c <ruta>] [--check | --doctor] [--no-music]
+///           [--autoplay | --autoplay-deterministic] [--autoplay-delay <ms>] [ruta]
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut path: Option<PathBuf> = None;
     let mut mode = Mode::Play;
     let mut no_music = false;
+    let mut autoplay: Option<autoplay::AutoplayConfig> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -177,6 +184,18 @@ fn parse_args() -> Args {
             "--check" => mode = Mode::Check,
             "--doctor" => mode = Mode::Doctor,
             "--no-music" | "--mute" => no_music = true,
+            "--autoplay" => autoplay = Some(autoplay::AutoplayConfig::default()),
+            "--autoplay-deterministic" => autoplay = Some(autoplay::AutoplayConfig::strict()),
+            "--autoplay-delay" => {
+                let delay_ms = args
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(900);
+                match autoplay.as_mut() {
+                    Some(config) => config.set_delay(delay_ms),
+                    None => autoplay = Some(autoplay::AutoplayConfig::with_delay(delay_ms)),
+                }
+            }
             "-c" | "--campaign" => {
                 if let Some(p) = args.next() {
                     path = Some(PathBuf::from(p));
@@ -190,6 +209,7 @@ fn parse_args() -> Args {
         path: path.unwrap_or_else(|| PathBuf::from(DEFAULT_CAMPAIGN)),
         mode,
         no_music,
+        autoplay,
     }
 }
 
@@ -204,6 +224,12 @@ fn print_usage() {
     println!("      --check             Valida que la campaña carga y termina (no abre la TUI)");
     println!("      --doctor            Validación semántica avanzada (errores/avisos; sale ≠0 si hay errores)");
     println!("      --no-music          Desactiva la música (por defecto suena '<campaña>/music/mission_N_theme.wav')");
+    println!("      --autoplay          Juega la campaña automáticamente, visible paso a paso");
+    println!("      --autoplay-deterministic");
+    println!(
+        "                          Autoplay estricto: evita exploits/escaladas probabilísticas"
+    );
+    println!("      --autoplay-delay ms Pausa entre comandos del autoplay (por defecto 900)");
     println!("  -h, --help              Muestra esta ayuda");
     println!();
     println!("EJEMPLOS:");
@@ -213,9 +239,16 @@ fn print_usage() {
     println!("Si no se indica ruta, se usa '{DEFAULT_CAMPAIGN}'.");
 }
 
-fn run_game(campaign: simterm_engine::Campaign, audio: Option<audio::Audio>) -> io::Result<()> {
+fn run_game(
+    campaign: simterm_engine::Campaign,
+    audio: Option<audio::Audio>,
+    autoplay: Option<autoplay::AutoplayConfig>,
+) -> io::Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = App::new(campaign, audio);
+    if let Some(config) = autoplay {
+        app.enable_autoplay(config);
+    }
 
     let result = run(&mut terminal, &mut app);
 
@@ -226,14 +259,18 @@ fn run_game(campaign: simterm_engine::Campaign, audio: Option<audio::Audio>) -> 
 fn setup_terminal() -> io::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
 
 fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()
 }
 
@@ -249,10 +286,14 @@ fn run(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
         };
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key);
-                }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Event::Mouse(me) => match me.kind {
+                    MouseEventKind::ScrollUp => app.scroll_wheel(true),
+                    MouseEventKind::ScrollDown => app.scroll_wheel(false),
+                    _ => {}
+                },
+                _ => {}
             }
         }
 

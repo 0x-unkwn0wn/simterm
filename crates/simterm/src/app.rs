@@ -9,6 +9,7 @@ use simterm_engine::actions;
 use simterm_engine::{Campaign, GameOutcome, GameState};
 
 use crate::audio::Audio;
+use crate::autoplay::{Autoplay, AutoplayConfig, AutoplayMode};
 use crate::command::{self, Command};
 use crate::completion::{self, Completion};
 use crate::effects::{Effect, EffectKind};
@@ -30,6 +31,9 @@ pub struct App {
     pub follow: bool,
     /// Altura visible del panel de logs (la rellena la UI en cada frame).
     pub log_view_height: u16,
+    /// Ancho visible del panel de logs (la rellena la UI en cada frame). Se usa
+    /// para disponer en columnas la lista de autocompletado.
+    pub log_view_width: u16,
     /// Nº total de líneas del panel de logs en el último frame.
     pub log_total_lines: u16,
     /// Historial de comandos introducidos (el más reciente al final).
@@ -52,6 +56,8 @@ pub struct App {
     tick_accum: Duration,
     /// Subsistema de audio (música por misión). `None` si va en silencio.
     audio: Option<Audio>,
+    /// Autoplayer visible: si está activo, juega la campaña solo, paso a paso.
+    autoplay: Option<Autoplay>,
 }
 
 impl App {
@@ -77,6 +83,7 @@ impl App {
             scroll: 0,
             follow: true,
             log_view_height: 0,
+            log_view_width: 0,
             log_total_lines: 0,
             history: Vec::new(),
             hist_pos: None,
@@ -88,6 +95,7 @@ impl App {
             last_tick: Instant::now(),
             tick_accum: Duration::ZERO,
             audio,
+            autoplay: None,
         };
         // Tras el arranque, el briefing de la operación activa (1ª o reanudada).
         let brief = app.briefing_effect(start_level);
@@ -95,6 +103,19 @@ impl App {
         // Arranca la pista de la misión activa (si hay audio).
         app.sync_audio();
         app
+    }
+
+    /// Activa el autoplayer visible: la campaña se jugará sola, paso a paso,
+    /// inyectando comandos reales por el mismo dispatcher que el jugador.
+    pub fn enable_autoplay(&mut self, config: AutoplayConfig) {
+        let label = match config.mode {
+            AutoplayMode::Normal => "normal",
+            AutoplayMode::Strict => "determinista",
+        };
+        self.autoplay = Some(Autoplay::new(config));
+        self.game.log(format!(
+            "[autoplay] Activado ({label}): la campaña se jugará automáticamente paso a paso."
+        ));
     }
 
     /// Sincroniza la música con la misión activa. No hace nada si no hay audio o
@@ -185,6 +206,23 @@ impl App {
         } else {
             self.tick_accum = Duration::ZERO;
         }
+
+        // El autoplayer solo actúa cuando no hay animación tapando la pantalla.
+        if self.effect.is_none() {
+            self.autoplay_tick(now);
+        }
+    }
+
+    /// Pide al autoplayer el siguiente comando (si toca por tiempo) y lo ejecuta
+    /// por el dispatcher normal, como si lo tecleara el jugador.
+    fn autoplay_tick(&mut self, now: Instant) {
+        let Some(mut autoplay) = self.autoplay.take() else {
+            return;
+        };
+        if let Some(line) = autoplay.next_command(&self.game, now) {
+            self.submit_line(line);
+        }
+        self.autoplay = Some(autoplay);
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -318,11 +356,23 @@ impl App {
                 self.cursor = self.input_len();
             }
             Completion::List { options } => {
-                // Como en una shell: se reimprime la línea y debajo, los candidatos.
+                // Como en una shell: se reimprime la línea y debajo, los candidatos
+                // dispuestos en columnas alineadas al ancho visible del panel.
                 let prompt = self.game.prompt();
                 self.game.log(format!("{prompt}{}", self.input));
-                self.game.log(format!("  {}", options.join("   ")));
+                for line in completion::format_columns(&options, self.log_view_width) {
+                    self.game.log(line);
+                }
             }
+        }
+    }
+
+    /// Scroll del registro por rueda de ratón (una muesca ≈ 3 líneas).
+    pub fn scroll_wheel(&mut self, up: bool) {
+        if up {
+            self.scroll_up(3);
+        } else {
+            self.scroll_down(3);
         }
     }
 
@@ -378,6 +428,13 @@ impl App {
     fn submit(&mut self) {
         let raw = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.submit_line(raw);
+    }
+
+    /// Ejecuta una línea de comando concreta (la tecleada por el jugador o la
+    /// inyectada por el autoplayer). El eco, el historial y las transiciones son
+    /// idénticos en ambos casos.
+    fn submit_line(&mut self, raw: String) {
         let cmd = command::parse(&raw);
         self.hist_pos = None;
 
@@ -455,7 +512,7 @@ impl App {
                 self.game.logs.clear();
                 self.follow = true;
             }
-            Command::Help => self.cmd_help(),
+            Command::Help { all } => self.cmd_help(all),
             Command::Target => self.cmd_target(),
             Command::Recon => actions::recon(&mut self.game),
             Command::Sniff => actions::sniff(&mut self.game),

@@ -170,6 +170,34 @@ fn id_candidates(state: &GameState, frag: &str) -> Vec<String> {
         .collect()
 }
 
+/// Dispone una lista de candidatos en columnas alineadas que quepan en `width`,
+/// como hace una shell real al listar el autocompletado. El relleno es vertical
+/// (column-major, igual que `ls`): se recorre hacia abajo y luego a la derecha.
+/// Devuelve una línea de log por fila.
+pub fn format_columns(items: &[String], width: u16) -> Vec<String> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let width = width.max(20) as usize;
+    let longest = items.iter().map(|s| s.chars().count()).max().unwrap_or(1);
+    let col_w = longest + 2; // dos espacios de separación entre columnas
+    let cols = (width / col_w).max(1);
+    let rows = items.len().div_ceil(cols);
+
+    let mut lines = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..cols {
+            if let Some(item) = items.get(c * rows + r) {
+                line.push_str(&format!("{item:<col_w$}"));
+            }
+        }
+        // El relleno de la última celda deja espacios sobrantes: se recortan.
+        lines.push(line.trim_end().to_string());
+    }
+    lines
+}
+
 /// Prefijo común (por caracteres) de un conjunto no vacío de candidatos.
 fn common_prefix(cands: &[String]) -> String {
     let mut prefix: Vec<char> = cands[0].chars().collect();
@@ -227,5 +255,26 @@ mod tests {
     fn sin_candidatos_no_hace_nada() {
         let g = game();
         assert!(matches!(complete(&g, "zzzz"), Completion::None));
+    }
+
+    #[test]
+    fn columnas_ajustan_al_ancho_sin_romper_palabras() {
+        let items: Vec<String> = ["ls", "cat", "cd", "privesc", "exploit", "nmap"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Ancho estrecho: varias filas, ninguna excede el ancho.
+        let lines = format_columns(&items, 24);
+        assert!(lines.len() > 1, "esperaba varias filas");
+        for l in &lines {
+            assert!(l.chars().count() <= 24, "fila demasiado ancha: {l:?}");
+            // Ningún candidato debe aparecer partido: todos íntegros en alguna fila.
+        }
+        let joined: String = lines.join(" ");
+        for it in &items {
+            assert!(joined.contains(it.as_str()), "falta '{it}' íntegro");
+        }
+        // Lista vacía -> sin líneas.
+        assert!(format_columns(&[], 80).is_empty());
     }
 }

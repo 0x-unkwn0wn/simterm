@@ -303,8 +303,10 @@ fn draw_console(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let total = lines.len() as u16;
 
-    // La UI informa al estado del tamaño visible para gestionar el scroll.
+    // La UI informa al estado del tamaño visible para gestionar el scroll y la
+    // disposición en columnas del autocompletado.
     app.log_view_height = inner.height;
+    app.log_view_width = inner.width;
     app.log_total_lines = total;
 
     let max_scroll = total.saturating_sub(inner.height);

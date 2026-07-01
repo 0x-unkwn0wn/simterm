@@ -2,152 +2,70 @@
 //! hallazgos, identidad y estado. Solo construyen líneas de log; no tocan la
 //! lógica del juego.
 
-use simterm_engine::{FindingStatus, GameOutcome, Language};
+use simterm_engine::{FindingStatus, GameOutcome, Language, Phase};
 
 use super::App;
 
 impl App {
-    pub(super) fn cmd_help(&mut self) {
+    /// Ayuda. Por defecto muestra solo la fase actual (+ GENERAL); `help all`
+    /// vuelca además la referencia completa de comandos.
+    pub(super) fn cmd_help(&mut self, all: bool) {
         let lang = self.game.campaign.language;
-        let phase = self.game.phase.label();
-        let mut lines = match lang {
-            Language::Es => vec![
-                format!("--- AYUDA (fase actual: {phase}) ---"),
-                String::from("Kill chain: RECON -> ENUM -> EXPLOIT -> POST. Cada fase habilita acciones."),
-                String::from("[RECON] (la entrada varía según la operación)"),
-                String::from("  nmap                 - escaneo activo: revela todos los servicios (t+5, ruido+4)"),
-                String::from("  sniff                - interceptación pasiva: 1 servicio por uso (t+8, ruido+1)"),
-                String::from("  connect [host]       - pivota tras un bastión (solo operaciones con bastión)"),
-                String::from("  target               - datos del host y servicios descubiertos"),
-                String::from("[ENUM] (enumera cada servicio con la herramienta ADECUADA a su tipo)"),
-            ],
-            Language::En => vec![
-                format!("--- HELP (current phase: {phase}) ---"),
-                String::from("Kill chain: RECON -> ENUM -> EXPLOIT -> POST. Each phase unlocks actions."),
-                String::from("[RECON] (entry point depends on the operation)"),
-                String::from("  nmap                 - active scan: reveals all services (t+5, noise+4)"),
-                String::from("  sniff                - passive interception: 1 service per use (t+8, noise+1)"),
-                String::from("  connect [host]       - pivot through a bastion (bastion operations only)"),
-                String::from("  target               - host data and discovered services"),
-                String::from("[ENUM] (enumerate each service with the RIGHT tool for its type)"),
-            ],
-        };
-        for t in simterm_engine::toolbox::TOOLS {
-            let affi = if t.affinities.is_empty() {
-                match lang {
-                    Language::Es => String::from("cualquiera"),
-                    Language::En => String::from("any"),
-                }
-            } else {
-                t.affinities
-                    .iter()
-                    .map(|c| c.label_in(lang))
-                    .collect::<Vec<_>>()
-                    .join("/")
-            };
-            let arg = match lang {
-                Language::Es => "puerto",
-                Language::En => "port",
-            };
-            let affinity = match lang {
-                Language::Es => "afín",
-                Language::En => "fit",
-            };
-            let noise = match lang {
-                Language::Es => "ruido",
-                Language::En => "noise",
-            };
-            lines.push(format!(
-                "  {:<11}<{}> - {} [{}: {}, {} {:.0}]",
-                t.name,
-                arg,
-                t.desc_in(lang),
-                affinity,
-                affi,
-                noise,
-                t.noise
-            ));
+        let phase = self.game.phase;
+        let phase_label = phase.label();
+
+        let mut lines: Vec<String> = Vec::new();
+
+        // Cabecera + kill chain (siempre).
+        lines.push(match lang {
+            Language::Es => format!("--- AYUDA (fase actual: {phase_label}) ---"),
+            Language::En => format!("--- HELP (current phase: {phase_label}) ---"),
+        });
+        lines.push(match lang {
+            Language::Es => String::from(
+                "Kill chain: RECON -> ENUM -> EXPLOIT -> POST. Cada fase habilita acciones.",
+            ),
+            Language::En => String::from(
+                "Kill chain: RECON -> ENUM -> EXPLOIT -> POST. Each phase unlocks actions.",
+            ),
+        });
+
+        // Bloques por fase: en modo compacto, solo el de la fase en curso.
+        let show = |p: Phase| all || phase == p;
+        if show(Phase::Recon) {
+            lines.extend(Self::help_recon(lang));
         }
-        let rest: &[&str] = match lang {
-            Language::Es => &[
-                "  searchsploit <id>    - investiga un hallazgo (poco ruido; precisión ~78%)",
-                "  intel                - lista los hallazgos con su confianza estimada",
-                "[EXPLOIT]",
-                "  exploit <id>         - explota un hallazgo; éxito = shell de usuario (fase POST)",
-                "  login                - foothold determinista si reutilizas una credencial válida",
-                "  netmap               - (red interna) descubre hosts vecinos desde un host comprometido",
-                "  pivot <host>         - (red interna) cambia el contexto a otro host alcanzable",
-                "[POST] (tras conseguir shell — explora el sistema de archivos)",
-                "  ls [ruta]            - lista un directorio",
-                "  cd [ruta] / pwd      - cambia de directorio / muestra el actual",
-                "  cat <ruta>           - lee un fichero (lore, credenciales, objetivo)",
-                "  find [texto]         - busca ficheros por nombre",
-                "  john <ruta>          - rompe un hash saqueado (alias: hashcat)",
-                "  strings <ruta>       - extrae cadenas de un binario reversible",
-                "  disasm <ruta>        - pseudo-desensambla un binario (alias: objdump/r2)",
-                "  solve <ruta> <sec>   - entrega el secreto extraído por reversing",
-                "  base64 <ruta>        - decodifica un fichero Base64",
-                "  xor <ruta> <clave>   - decodifica un fichero XOR",
-                "  linpeas              - enumera escalada local (cubre sudo/suid/kernel/cron)",
-                "  sudo -l / suid / sysinfo - chequeos locales específicos de privesc",
-                "  privesc              - escala a root (desbloquea ficheros protegidos)",
-                "  cleanup              - encubre tu rastro: baja la traza (coste y riesgo crecientes)",
-                "  loot                 - muestra el botín recogido",
-                "  >> objetivo: exfiltra con 'cat' el fichero objetivo para completar el nivel",
-                "[GENERAL]",
-                "  whoami               - identidad de la sesión actual",
-                "  status / logs        - resumen de estado · ir al final del registro",
-                "  logros               - muestra logros desbloqueados y pendientes",
-                "  clear / quit         - limpia la consola · salir del juego",
-                "  reset                - reinicia la campaña (borra el progreso guardado)",
-                "Pistas: la herramienta adecuada da hallazgos reales con poco ruido; la inadecuada,",
-                "ruido y falsos positivos. La confianza es una ESTIMACIÓN: investiga antes de explotar.",
-                "Teclas: Tab autocompleta · ↑/↓ historial · RePág/AvPág scroll · Esc limpia línea.",
-                "Rumor de campo: el sistema responde a más señales de las que figuran aquí.",
-            ],
-            Language::En => &[
-                "  searchsploit <id>    - research a finding (low noise; ~78% accuracy)",
-                "  intel                - list findings with estimated confidence",
-                "[EXPLOIT]",
-                "  exploit <id>         - exploit a finding; success = user shell (POST phase)",
-                "  login                - deterministic foothold with a valid reused credential",
-                "  netmap               - (internal network) discover neighboring hosts from a compromised host",
-                "  pivot <host>         - (internal network) move context to a reachable host",
-                "[POST] (after getting a shell - explore the filesystem)",
-                "  ls [path]            - list a directory",
-                "  cd [path] / pwd      - change directory / show current directory",
-                "  cat <path>           - read a file (lore, credentials, objective)",
-                "  find [text]          - search files by name",
-                "  john <path>          - crack a looted hash (alias: hashcat)",
-                "  strings <path>       - extract strings from a reversible binary",
-                "  disasm <path>        - pseudo-disassemble a binary (alias: objdump/r2)",
-                "  solve <path> <sec>   - submit the secret extracted by reversing",
-                "  base64 <path>        - decode a Base64 file",
-                "  xor <path> <key>     - decode a XOR file",
-                "  linpeas              - enumerate local privesc (covers sudo/suid/kernel/cron)",
-                "  sudo -l / suid / sysinfo - specific local privesc checks",
-                "  privesc              - escalate to root (unlocks protected files)",
-                "  cleanup              - cover your tracks: lowers trace (increasing cost and risk)",
-                "  loot                 - show collected loot",
-                "  >> objective: exfiltrate the objective file with 'cat' to complete the level",
-                "[GENERAL]",
-                "  whoami               - current session identity",
-                "  status / logs        - status summary / jump to the end of the log",
-                "  logros               - show unlocked and pending achievements",
-                "  clear / quit         - clear console / exit the game",
-                "  reset                - restart the campaign (deletes saved progress)",
-                "Tips: the right tool finds real issues with low noise; the wrong one creates",
-                "noise and false positives. Confidence is an ESTIMATE: research before exploiting.",
-                "Keys: Tab autocomplete · Up/Down history · PgUp/PgDn scroll · Esc clears line.",
-                "Field rumor: the system responds to more signals than the manual lists.",
-            ],
-        };
-        for line in rest {
-            lines.push(line.to_string());
+        if show(Phase::Enum) {
+            lines.extend(Self::help_enum(lang));
+        }
+        if show(Phase::Exploit) {
+            lines.extend(Self::help_exploit(lang));
+        }
+        if show(Phase::Post) {
+            lines.extend(Self::help_post(lang));
         }
 
-        // Referencia rápida de comandos, generada desde el registro único
-        // (`registry::reference_lines`): alias, uso y naturaleza de cada built-in.
+        // GENERAL y pistas: siempre.
+        lines.extend(Self::help_general(lang));
+        lines.extend(Self::help_tips(lang));
+
+        if !all {
+            lines.push(match lang {
+                Language::Es => String::from(
+                    "(escribe 'help all' para la referencia completa de todos los comandos)",
+                ),
+                Language::En => {
+                    String::from("(type 'help all' for the full reference of every command)")
+                }
+            });
+            for l in lines {
+                self.game.log(l);
+            }
+            return;
+        }
+
+        // --- 'help all': referencia completa autogenerada desde el registro ---
+        // (alias, uso y naturaleza de cada built-in).
         lines.push(match lang {
             Language::Es => {
                 String::from("--- REFERENCIA RÁPIDA (desde el registro de comandos) ---")
@@ -200,6 +118,193 @@ impl App {
         for l in lines {
             self.game.log(l);
         }
+    }
+
+    // ---- Bloques de ayuda por fase (líneas curadas; se muestran según fase) ----
+
+    fn help_recon(lang: Language) -> Vec<String> {
+        let src: &[&str] = match lang {
+            Language::Es => &[
+                "[RECON] (la entrada varía según la operación)",
+                "  nmap                 - escaneo activo: revela todos los servicios (t+5, ruido+4)",
+                "  sniff                - interceptación pasiva: 1 servicio por uso (t+8, ruido+1)",
+                "  connect [host]       - pivota tras un bastión (solo operaciones con bastión)",
+                "  target               - datos del host y servicios descubiertos",
+            ],
+            Language::En => &[
+                "[RECON] (entry point depends on the operation)",
+                "  nmap                 - active scan: reveals all services (t+5, noise+4)",
+                "  sniff                - passive interception: 1 service per use (t+8, noise+1)",
+                "  connect [host]       - pivot through a bastion (bastion operations only)",
+                "  target               - host data and discovered services",
+            ],
+        };
+        src.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn help_enum(lang: Language) -> Vec<String> {
+        let mut lines = vec![match lang {
+            Language::Es => {
+                String::from("[ENUM] (enumera cada servicio con la herramienta ADECUADA a su tipo)")
+            }
+            Language::En => {
+                String::from("[ENUM] (enumerate each service with the RIGHT tool for its type)")
+            }
+        }];
+        for t in simterm_engine::toolbox::TOOLS {
+            let affi = if t.affinities.is_empty() {
+                match lang {
+                    Language::Es => String::from("cualquiera"),
+                    Language::En => String::from("any"),
+                }
+            } else {
+                t.affinities
+                    .iter()
+                    .map(|c| c.label_in(lang))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
+            let arg = match lang {
+                Language::Es => "puerto",
+                Language::En => "port",
+            };
+            let affinity = match lang {
+                Language::Es => "afín",
+                Language::En => "fit",
+            };
+            let noise = match lang {
+                Language::Es => "ruido",
+                Language::En => "noise",
+            };
+            lines.push(format!(
+                "  {:<11}<{}> - {} [{}: {}, {} {:.0}]",
+                t.name,
+                arg,
+                t.desc_in(lang),
+                affinity,
+                affi,
+                noise,
+                t.noise
+            ));
+        }
+        let tail: &[&str] = match lang {
+            Language::Es => &[
+                "  searchsploit <id>    - investiga un hallazgo (poco ruido; precisión ~78%)",
+                "  intel                - lista los hallazgos con su confianza estimada",
+            ],
+            Language::En => &[
+                "  searchsploit <id>    - research a finding (low noise; ~78% accuracy)",
+                "  intel                - list findings with estimated confidence",
+            ],
+        };
+        lines.extend(tail.iter().map(|s| s.to_string()));
+        lines
+    }
+
+    fn help_exploit(lang: Language) -> Vec<String> {
+        let src: &[&str] = match lang {
+            Language::Es => &[
+                "[EXPLOIT]",
+                "  exploit <id>         - explota un hallazgo; éxito = shell de usuario (fase POST)",
+                "  login                - foothold determinista si reutilizas una credencial válida",
+                "  netmap               - (red interna) descubre hosts vecinos desde un host comprometido",
+                "  pivot <host>         - (red interna) cambia el contexto a otro host alcanzable",
+            ],
+            Language::En => &[
+                "[EXPLOIT]",
+                "  exploit <id>         - exploit a finding; success = user shell (POST phase)",
+                "  login                - deterministic foothold with a valid reused credential",
+                "  netmap               - (internal network) discover neighboring hosts from a compromised host",
+                "  pivot <host>         - (internal network) move context to a reachable host",
+            ],
+        };
+        src.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn help_post(lang: Language) -> Vec<String> {
+        let src: &[&str] = match lang {
+            Language::Es => &[
+                "[POST] (tras conseguir shell — explora el sistema de archivos)",
+                "  ls [ruta]            - lista un directorio",
+                "  cd [ruta] / pwd      - cambia de directorio / muestra el actual",
+                "  cat <ruta>           - lee un fichero (lore, credenciales, objetivo)",
+                "  find [texto]         - busca ficheros por nombre",
+                "  john <ruta>          - rompe un hash saqueado (alias: hashcat)",
+                "  strings <ruta>       - extrae cadenas de un binario reversible",
+                "  disasm <ruta>        - pseudo-desensambla un binario (alias: objdump/r2)",
+                "  solve <ruta> <sec>   - entrega el secreto extraído por reversing",
+                "  base64 <ruta>        - decodifica un fichero Base64",
+                "  xor <ruta> <clave>   - decodifica un fichero XOR",
+                "  linpeas              - enumera escalada local (cubre sudo/suid/kernel/cron)",
+                "  sudo -l / suid / sysinfo - chequeos locales específicos de privesc",
+                "  privesc              - escala a root (desbloquea ficheros protegidos)",
+                "  cleanup              - encubre tu rastro: baja la traza (coste y riesgo crecientes)",
+                "  loot                 - muestra el botín recogido",
+                "  >> objetivo: exfiltra con 'cat' el fichero objetivo para completar el nivel",
+            ],
+            Language::En => &[
+                "[POST] (after getting a shell - explore the filesystem)",
+                "  ls [path]            - list a directory",
+                "  cd [path] / pwd      - change directory / show current directory",
+                "  cat <path>           - read a file (lore, credentials, objective)",
+                "  find [text]          - search files by name",
+                "  john <path>          - crack a looted hash (alias: hashcat)",
+                "  strings <path>       - extract strings from a reversible binary",
+                "  disasm <path>        - pseudo-disassemble a binary (alias: objdump/r2)",
+                "  solve <path> <sec>   - submit the secret extracted by reversing",
+                "  base64 <path>        - decode a Base64 file",
+                "  xor <path> <key>     - decode a XOR file",
+                "  linpeas              - enumerate local privesc (covers sudo/suid/kernel/cron)",
+                "  sudo -l / suid / sysinfo - specific local privesc checks",
+                "  privesc              - escalate to root (unlocks protected files)",
+                "  cleanup              - cover your tracks: lowers trace (increasing cost and risk)",
+                "  loot                 - show collected loot",
+                "  >> objective: exfiltrate the objective file with 'cat' to complete the level",
+            ],
+        };
+        src.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn help_general(lang: Language) -> Vec<String> {
+        let src: &[&str] = match lang {
+            Language::Es => &[
+                "[GENERAL]",
+                "  help all             - referencia completa de todos los comandos",
+                "  whoami               - identidad de la sesión actual",
+                "  status / logs        - resumen de estado · ir al final del registro",
+                "  logros               - muestra logros desbloqueados y pendientes",
+                "  clear / quit         - limpia la consola · salir del juego",
+                "  reset                - reinicia la campaña (borra el progreso guardado)",
+            ],
+            Language::En => &[
+                "[GENERAL]",
+                "  help all             - full reference of every command",
+                "  whoami               - current session identity",
+                "  status / logs        - status summary / jump to the end of the log",
+                "  logros               - show unlocked and pending achievements",
+                "  clear / quit         - clear console / exit the game",
+                "  reset                - restart the campaign (deletes saved progress)",
+            ],
+        };
+        src.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn help_tips(lang: Language) -> Vec<String> {
+        let src: &[&str] = match lang {
+            Language::Es => &[
+                "Pistas: la herramienta adecuada da hallazgos reales con poco ruido; la inadecuada,",
+                "ruido y falsos positivos. La confianza es una ESTIMACIÓN: investiga antes de explotar.",
+                "Teclas: Tab autocompleta · ↑/↓ historial · RePág/AvPág o rueda scroll · Esc limpia línea.",
+                "Rumor de campo: el sistema responde a más señales de las que figuran aquí.",
+            ],
+            Language::En => &[
+                "Tips: the right tool finds real issues with low noise; the wrong one creates",
+                "noise and false positives. Confidence is an ESTIMATE: research before exploiting.",
+                "Keys: Tab autocomplete · Up/Down history · PgUp/PgDn or wheel scroll · Esc clears line.",
+                "Field rumor: the system responds to more signals than the manual lists.",
+            ],
+        };
+        src.iter().map(|s| s.to_string()).collect()
     }
 
     pub(super) fn cmd_target(&mut self) {

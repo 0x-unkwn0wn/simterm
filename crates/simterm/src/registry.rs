@@ -82,9 +82,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "help",
         aliases: &["h", "?"],
         category: Category::General,
-        summary: "Muestra la ayuda de comandos.",
-        usage: None,
-        takes_args: false,
+        summary: "Ayuda de la fase actual (usa 'help all' para verlo todo).",
+        usage: Some("help [all]"),
+        takes_args: true,
         kind: CommandKind::FrontendOnly,
     },
     CommandSpec {

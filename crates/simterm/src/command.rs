@@ -9,7 +9,10 @@ use simterm_engine::toolbox;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    Help,
+    /// Ayuda. `all` = referencia completa; si es `false`, solo la fase actual.
+    Help {
+        all: bool,
+    },
     Target,
     /// Reconocimiento activo del host (nmap).
     Recon,
@@ -125,7 +128,9 @@ pub fn parse(input: &str) -> Command {
         .to_string();
 
     match verb.as_str() {
-        "help" | "h" | "?" => Command::Help,
+        "help" | "h" | "?" => Command::Help {
+            all: matches!(arg, Some("all") | Some("todo") | Some("full") | Some("-a")),
+        },
         "target" | "host" => Command::Target,
         "nmap" | "scan" | "recon" => Command::Recon,
         "sniff" | "intercept" | "listen" => Command::Sniff,
