@@ -1,3 +1,5 @@
+![SimTerm open-source Rust framework header](assets/simterm-header.png)
+
 # SimTerm
 
 SimTerm is an open-source framework for building immersive terminal-based games
