@@ -7,10 +7,8 @@ save.ron
 /save/
 /logs/
 
-# ---- Contenido PRIVADO (no se publica con el motor Open Source) ----
-# La campaña oficial y cualquier campaña privada viven fuera del repo público.
-/campaigns/private/
-/campaigns/official/
+# ---- Contenido no publicado con el motor Open Source ----
+/campaigns/
 /Landing_page/
 
 # ---- Editor / SO ----
