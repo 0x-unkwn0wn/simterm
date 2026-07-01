@@ -49,6 +49,8 @@ struct SaveData {
     achievements: Vec<AchievementId>,
     #[serde(default)]
     campaign_achievements: Vec<String>,
+    #[serde(default)]
+    flags: Vec<String>,
 }
 
 /// Estado (definición + runtime) de un host dentro de una red interna. En las
@@ -357,6 +359,14 @@ pub struct GameState {
     pub achievements: Vec<AchievementId>,
     /// Logros data-driven de campaña desbloqueados.
     pub campaign_achievements: Vec<String>,
+    /// Flags persistentes de campaña, activadas por comandos declarativos
+    /// (`SetFlag`). Persisten entre niveles y en el guardado.
+    pub flags: Vec<String>,
+    /// Overrides de entorno de la sesión (`export VAR=valor`). No se persisten y
+    /// se reinician al cambiar de nivel (dejas la caja anterior).
+    pub env_session: Vec<(String, String)>,
+    /// Código de salida del último comando de shell (`$?`). No se persiste.
+    pub last_exit: i32,
 }
 
 impl GameState {
@@ -409,6 +419,9 @@ impl GameState {
             epilogue: None,
             achievements: Vec::new(),
             campaign_achievements: Vec::new(),
+            flags: Vec::new(),
+            env_session: Vec::new(),
+            last_exit: 0,
         };
 
         // Carga la primera operación (construye sus hosts y siembra la entrada).
@@ -550,6 +563,30 @@ impl GameState {
 
     pub fn log(&mut self, msg: String) {
         self.logs.push(format!("[t={:>3}] {}", self.clock, msg));
+    }
+
+    /// ¿Está activa la flag de campaña indicada?
+    pub fn has_flag(&self, name: &str) -> bool {
+        self.flags.iter().any(|f| f == name)
+    }
+
+    /// Activa una flag de campaña. Devuelve `true` si era nueva.
+    pub fn set_flag(&mut self, name: &str) -> bool {
+        if self.has_flag(name) {
+            return false;
+        }
+        self.flags.push(name.to_string());
+        true
+    }
+
+    /// Desactiva una flag de campaña. Devuelve `true` si existía.
+    pub fn clear_flag(&mut self, name: &str) -> bool {
+        if let Some(i) = self.flags.iter().position(|f| f == name) {
+            self.flags.remove(i);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn unlock_achievement(&mut self, id: AchievementId) -> bool {
@@ -784,6 +821,9 @@ impl GameState {
         self.pivoted = false;
         self.awaiting_choice = false;
         self.epilogue = None;
+        // El entorno de sesión y el último código de salida son del host actual.
+        self.env_session.clear();
+        self.last_exit = 0;
 
         // Construye los hosts del nivel y carga el de entrada en los campos vivos.
         self.build_hosts(&m);
@@ -1097,6 +1137,7 @@ impl GameState {
             has_wordlist: self.has_wordlist,
             achievements: self.achievements.clone(),
             campaign_achievements: self.campaign_achievements.clone(),
+            flags: self.flags.clone(),
         };
         if let Ok(text) = ron::ser::to_string(&data) {
             let _ = std::fs::write(SAVE_PATH, text); // best-effort
@@ -1133,6 +1174,7 @@ impl GameState {
                 self.has_wordlist = sd.has_wordlist;
                 self.achievements = sd.achievements;
                 self.campaign_achievements = sd.campaign_achievements;
+                self.flags = sd.flags;
                 self.apply_mission(sd.level_index);
                 self.logs.clear();
                 self.log(format!("=== {} ===", self.campaign.name));
@@ -1152,6 +1194,7 @@ impl GameState {
         self.foothold_tokens.clear();
         self.achievements.clear();
         self.campaign_achievements.clear();
+        self.flags.clear();
         self.campaign_clock = 0;
         self.last_summary = None;
         self.outcome = None;

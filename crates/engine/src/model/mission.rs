@@ -128,4 +128,10 @@ pub struct Mission {
     /// Red interna de hosts (modo multi-host). Si está vacía, se usa `target`.
     #[serde(default)]
     pub network: Vec<NetHost>,
+    /// Pista de música de la misión, como ruta RELATIVA al directorio de la
+    /// campaña (p. ej. `"music/theme.wav"`). Si es `None`, el frontend recurre a
+    /// la convención por nombre: `music/mission_{N}_theme.wav`. Es solo
+    /// presentación: el motor no reproduce audio, solo transporta el dato.
+    #[serde(default)]
+    pub music: Option<String>,
 }

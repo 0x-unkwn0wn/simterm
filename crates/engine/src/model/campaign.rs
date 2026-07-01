@@ -3,11 +3,16 @@
 //! Una `Campaign` es 100% datos cargados desde disco (RON). El motor no contiene
 //! ninguna campaña; solo sabe interpretar esta estructura.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::model::language::Language;
 use crate::model::mission::Mission;
+use crate::model::terminal::TerminalCommand;
 use crate::model::theme::{EasterEgg, Theme};
+
+pub use crate::model::command::{CampaignCommand, CommandCondition, CommandEffect};
 
 /// Una campaña: secuencia de misiones + toda su tematización y contenido suelto.
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +44,24 @@ pub struct Campaign {
     /// Logros específicos de esta campaña, definidos como datos.
     #[serde(default)]
     pub achievements: Vec<CampaignAchievement>,
+    /// Comandos declarativos con efectos simples definidos por la campaña. A
+    /// diferencia de los `easter_eggs` (solo sabor), estos SÍ pueden alterar el
+    /// estado de la partida (flags, traza, logros...) sin tocar Rust.
+    #[serde(default)]
+    pub commands: Vec<CampaignCommand>,
+    /// Variables de entorno base del host objetivo (para `env`, `export` y la
+    /// expansión de `$VAR`). El motor deriva además `USER`, `HOME`, `PWD`,
+    /// `HOSTNAME` y `SHELL` a partir del estado.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Procesos extra que muestra `ps`, además de los sintetizados a partir de los
+    /// servicios del host. Formato libre (p. ej. `"www-data 812 nginx"`).
+    #[serde(default)]
+    pub processes: Vec<String>,
+    /// Comandos de terminal autorados (salida realista, presentacional). Para CLIs
+    /// ficticias que el motor no puede sintetizar (p. ej. `systemctl status`).
+    #[serde(default)]
+    pub terminal: Vec<TerminalCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,5 +115,20 @@ impl Campaign {
         self.easter_eggs
             .iter()
             .find(|e| e.triggers.iter().any(|t| t == verb))
+    }
+
+    /// Busca el comando declarativo cuyo conjunto de `triggers` contiene `verb`.
+    /// No comprueba condiciones: eso lo hace el runtime con el estado en curso.
+    pub fn command(&self, verb: &str) -> Option<&CampaignCommand> {
+        self.commands
+            .iter()
+            .find(|c| c.triggers.iter().any(|t| t == verb))
+    }
+
+    /// Busca el comando de terminal autorado cuyo `triggers` contiene `verb`.
+    pub fn terminal_command(&self, verb: &str) -> Option<&TerminalCommand> {
+        self.terminal
+            .iter()
+            .find(|c| c.triggers.iter().any(|t| t == verb))
     }
 }

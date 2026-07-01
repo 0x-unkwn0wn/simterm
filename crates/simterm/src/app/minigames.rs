@@ -10,10 +10,10 @@ use rand::Rng;
 use super::App;
 
 impl App {
-    /// Respuesta a un verbo no reconocido: si la campaña define un easter egg
-    /// para él, lo muestra (sustituyendo `{clock}` por el reloj); si no, informa
-    /// de comando desconocido.
-    pub(super) fn cmd_easter(&mut self, verb: &str) {
+    /// Easter egg de campaña para `verb`: si existe, imprime sus líneas
+    /// (sustituyendo `{clock}`) y devuelve `true`; si no, devuelve `false` para
+    /// que el dispatcher siga probando (o responda `command not found`).
+    pub(super) fn try_easter(&mut self, verb: &str) -> bool {
         let clock = self.game.clock;
         let lines: Option<Vec<String>> = self.game.campaign.easter_egg(verb).map(|egg| {
             egg.lines
@@ -26,10 +26,9 @@ impl App {
                 for l in ls {
                     self.game.log(l);
                 }
+                true
             }
-            None => self
-                .game
-                .log(format!("Comando desconocido: '{verb}'. Escribe 'help'.")),
+            None => false,
         }
     }
 

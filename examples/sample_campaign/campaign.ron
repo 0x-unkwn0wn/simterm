@@ -54,7 +54,6 @@ Campaign(
     // ---- Easter eggs: comandos ocultos temáticos (no afectan a la partida) ----
     easter_eggs: [
         (triggers: ["sudo"], lines: ["[sudo] No, en el polígono no."]),
-        (triggers: ["uname"], lines: ["POLIGONO 1.0 sim #1 PRACTICAS x86_64"]),
         (triggers: ["date"], lines: ["En la simulación solo corre el reloj interno: t={clock}."]),
         (triggers: ["hello", "hi"], lines: ["Hola, alumno. Teclea 'help' para empezar."]),
     ],
@@ -83,6 +82,71 @@ Campaign(
             description: "Termina todos los ejercicios de la campaña de ejemplo.",
             trigger: CampaignComplete,
         ),
+        (
+            id: "inspector",
+            title: "Inspector de terminales",
+            description: "Inspecciona la terminal del polígono.",
+            trigger: ReadFile("/root/flag.txt"),
+        ),
+    ],
+
+    // ---- Comandos declarativos: verbos de campaña CON efectos (sin tocar Rust) ----
+    //  A diferencia de los easter_eggs (solo sabor), estos cambian el estado:
+    //  ponen flags, suman/restan traza o desbloquean logros. Se muestran en la
+    //  ayuda y el autocompletado salvo que se marquen 'hidden: true'.
+    commands: [
+        (
+            // 'inspect'/'look': imprime sabor, deja una flag y añade algo de traza.
+            triggers: ["inspect", "look"],
+            lines: ["Inspeccionas la terminal del polígono con calma."],
+            effects: [
+                AddLog("Anotas lo que ves en el cuaderno de prácticas."),
+                SetFlag("terminal_inspeccionada"),
+                AddTrace(2.0),
+            ],
+        ),
+        (
+            // Comando oculto disponible solo tras 'inspect': reduce la traza.
+            triggers: ["limpiar-notas"],
+            hidden: true,
+            conditions: [FlagSet("terminal_inspeccionada")],
+            lines: ["Borras tus anotaciones: rastro reducido."],
+            effects: [
+                AddTrace(-3.0),
+                ClearFlag("terminal_inspeccionada"),
+            ],
+        ),
+    ],
+
+    // ---- Entorno del host: variables para env / export / expansión $VAR ----
+    //  El motor deriva además USER, HOME, PWD, HOSTNAME y SHELL del estado.
+    env: {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "en_US.UTF-8",
+        "APP_ENV": "training",
+    },
+
+    // ---- Procesos extra para 'ps' (además de los sintetizados de services) ----
+    processes: [
+        "root       420  /usr/sbin/cron",
+    ],
+
+    // ---- Comandos de terminal autorados (salida realista, presentacional) ----
+    //  Para CLIs que el motor no sintetiza. Admiten plantillas {clock}/{host}/
+    //  {env:X}/$VAR y respuestas por argumento. No cambian el estado del juego.
+    terminal: [
+        (
+            triggers: ["systemctl"],
+            args: [
+                ("status nginx", [
+                    "● nginx.service - A high performance web server",
+                    "     Active: active (running)",
+                    "   Main PID: 812 (nginx)",
+                ]),
+            ],
+            output: ["Usage: systemctl [OPTIONS...] {COMMAND} ..."],
+            exit: 1,
+        ),
     ],
 
     // ======================== EJERCICIOS (misiones) =========================
@@ -106,6 +170,10 @@ Campaign(
                 "Flag capturada. Ejercicio 1 superado.",
                 "Has visto el ciclo completo en un solo host.",
             ],
+            // Música opcional de la misión (ruta relativa a la campaña). Si se
+            // omite, el frontend busca 'music/mission_1_theme.wav'. Este ejemplo
+            // no trae ficheros de audio, así que queda en silencio.
+            // music: Some("music/intro_theme.wav"),
             entry: Active,
             target: (
                 hostname: "training-01.range.local",
@@ -176,9 +244,11 @@ Campaign(
             ],
             network: [
                 // Pasarela: punto de entrada, enlaza con la base de datos interna.
+                // El enlace usa el nombre corto del host destino ('db-03'), que es
+                // como 'netmap'/'pivot' resuelven los vecinos.
                 (
                     entry: true,
-                    links: ["db"],
+                    links: ["db-03"],
                     target: (
                         hostname: "gw-02.range.local",
                         ip: "192.0.2.20",

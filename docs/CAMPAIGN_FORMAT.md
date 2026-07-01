@@ -13,8 +13,16 @@ A campaign can be loaded from:
 Validate a campaign with:
 
 ```bash
+# Basic load check (does it parse and have missions?)
 cargo run -p simterm -- --check --campaign ./path/to/campaign
+
+# Advanced semantic validation (dangling refs, unreachable content, bad ranges)
+cargo run -p simterm -- --doctor --campaign ./path/to/campaign
 ```
+
+`--doctor` is stricter than `--check`: it reports **errors** (things that break the
+campaign) and **warnings** (things that smell wrong but still load). It exits with a
+non-zero status when there are errors. See [Validation Invariants](#validation-invariants).
 
 Most fields have defaults. Define only the fields your campaign needs.
 
@@ -31,6 +39,10 @@ Campaign(
     fortunes: ["..."],
     signals: ["ALPHA", "BRAVO"],
     achievements: [ ( ... ) ],
+    commands: [ ( ... ) ],
+    env: { "PATH": "/usr/bin:/bin" },
+    processes: ["root 420 /usr/sbin/cron"],
+    terminal: [ ( ... ) ],
 )
 ```
 
@@ -41,10 +53,14 @@ Campaign(
 | `intro` | string list | `[]` | Text shown when the campaign starts. |
 | `missions` | `Mission` list | required | Ordered mission sequence. Must not be empty. |
 | `theme` | `Theme` | neutral defaults | Branding and cosmetic UI text. |
-| `easter_eggs` | `EasterEgg` list | `[]` | Hidden flavor commands. |
+| `easter_eggs` | `EasterEgg` list | `[]` | Hidden flavor commands (no state change). |
 | `fortunes` | string list | generic defaults | Text used by `fortune`. |
 | `signals` | string list | generic defaults | Words used by the `signal` minigame. |
 | `achievements` | `CampaignAchievement` list | `[]` | Campaign-defined achievements. |
+| `commands` | `CampaignCommand` list | `[]` | Declarative commands with simple effects on game state. |
+| `env` | string→string map | `{}` | Environment variables for `env`, `export`, and `$VAR` expansion. |
+| `processes` | string list | `[]` | Extra `ps` rows, beyond those synthesized from `services`. |
+| `terminal` | `TerminalCommand` list | `[]` | Authored realistic shell commands (presentational). |
 
 ## `Theme`
 
@@ -77,6 +93,134 @@ provided than stages, the last one is reused.
 `triggers` are command verbs. `lines` are printed when the verb is entered.
 `{clock}` is replaced with the current mission clock. Easter eggs do not affect
 game state.
+
+## `CampaignCommand`
+
+Declarative commands are campaign-defined verbs that **do** change game state,
+without writing any Rust. They are the middle ground between built-in commands
+(engine code) and easter eggs (flavor only). See
+[Command Surface](COMMANDS.md) for how the three tiers compare.
+
+```ron
+commands: [
+    (
+        triggers: ["inspect", "look"],
+        lines: ["You inspect the terminal."],
+        effects: [
+            AddLog("Inspection complete."),
+            SetFlag("inspected_terminal"),
+            AddTrace(2.0),
+            UnlockAchievement("some-achievement-id"),
+        ],
+    ),
+    (
+        // Only available after "inspect", and hidden from help/autocomplete.
+        triggers: ["wipe-notes"],
+        hidden: true,
+        conditions: [FlagSet("inspected_terminal")],
+        lines: ["You wipe your notes: trace reduced."],
+        effects: [AddTrace(-3.0), ClearFlag("inspected_terminal")],
+    ),
+]
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `triggers` | string list | required | Command verbs that run this command. |
+| `lines` | string list | `[]` | Lines printed to the log. `{clock}` is substituted. |
+| `effects` | `CommandEffect` list | `[]` | Ordered effects applied to game state. |
+| `conditions` | `CommandCondition` list | `[]` | All must hold for the command to be available. |
+| `hidden` | bool | `false` | If `true`, omitted from `help` and autocomplete (still runnable). |
+
+If a verb's `conditions` are not met, it is treated as unrecognized and falls
+through to easter eggs / the unknown-command message, so a command can appear and
+disappear with state. Built-in verbs still take priority over campaign commands,
+and campaign commands take priority over easter eggs with the same trigger.
+
+### Effects (`CommandEffect`)
+
+| Effect | Description |
+|---|---|
+| `AddLog("text")` | Print an extra line to the log (`{clock}` is substituted). |
+| `SetFlag("name")` | Activate a persistent campaign flag. |
+| `ClearFlag("name")` | Deactivate a persistent campaign flag. |
+| `AddTrace(f32)` | Add trace (positive) or reduce it (negative). |
+| `UnlockAchievement("id")` | Unlock the `CampaignAchievement` with that `id`. |
+| `CompleteMission` | Complete the current mission (as if the objective was met). |
+
+Flags are campaign-scoped and persist across missions and saved progress; `reset`
+clears them. Combine `CompleteMission` with a `conditions` guard (e.g. a flag) to
+close a mission only when the player has done something specific.
+
+### Conditions (`CommandCondition`)
+
+| Condition | Available when |
+|---|---|
+| `FlagSet("name")` | The named flag is active. |
+| `FlagNotSet("name")` | The named flag is not active. |
+| `Mission("mission-id")` | The current mission has that `Mission.id`. |
+| `Phase("post")` | The current phase is at least the named one: `recon`, `enum`, `exploit`, or `post`. |
+
+## Terminal Emulation (`env`, `processes`, `TerminalCommand`)
+
+SimTerm emulates a realistic shell. Most system commands are **synthesized** from
+the host you already defined, so you rarely author their output. Shell output is
+authentic POSIX (English); narrative text still uses the campaign `language`.
+
+### `env` and `$VAR`
+
+```ron
+env: {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "APP_ENV": "training",
+    "APP_SECRET": "s3cr3t",   // a good place to hide clues
+},
+```
+
+The engine also derives `USER`, `LOGNAME`, `HOME`, `PWD`, `HOSTNAME`, and `SHELL`.
+`env` lists them all; `export VAR=value` sets a session variable (reset when you
+change host/mission). `$VAR`, `${VAR}`, and `$?` (last exit code) expand in `echo`
+and in `TerminalCommand` output.
+
+### `processes`
+
+Extra rows for `ps`, appended to the processes synthesized from the host's
+`services`:
+
+```ron
+processes: ["root       420  /usr/sbin/cron"],
+```
+
+### `TerminalCommand`
+
+For fictional CLIs the engine cannot synthesize. Presentational only (no game
+effect — for effects use `commands`).
+
+```ron
+terminal: [
+    (
+        triggers: ["systemctl"],
+        args: [
+            ("status nginx", ["● nginx.service - active (running)"]),
+        ],
+        output: ["Usage: systemctl [OPTIONS...] {COMMAND} ..."],
+        exit: 1,
+    ),
+],
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `triggers` | string list | required | Command verbs. |
+| `output` | string list | `[]` | Default output when no `args` case matches. |
+| `args` | `(string, string list)` list | `[]` | Per-argument output; key is the exact arg string after the verb. |
+| `exit` | integer | `0` | Exit code left in `$?`. |
+| `hidden` | bool | `false` | If `true`, omitted from `help` and autocomplete. |
+
+Output supports templates: `{clock}`, `{user}`, `{host}`, `{ip}`, `{os}`,
+`{cwd}`, `{env:NAME}`, plus `$VAR`/`$?`. System built-ins (`uname`, `ps`,
+`netstat`, `env`, `grep`…) take priority, so `--doctor` warns if a `terminal`
+trigger would be shadowed.
 
 ## `CampaignAchievement`
 
@@ -166,6 +310,7 @@ Mission(
 | `endings` | `Ending` list | `[]` | Branching ending choices, usually on the final mission. |
 | `target` | `TargetNode` | empty | Single-host target. |
 | `network` | `NetHost` list | `[]` | Multi-host network. If present, `target` is ignored. |
+| `music` | optional string | `None` | WAV path (relative to the campaign) for this mission's track. See [Music](#music-optional). |
 
 ## `EntryVector`
 
@@ -348,6 +493,42 @@ Use `network` instead of `target` for multi-host missions. Mark at least one
 host as `entry: true`, connect hosts with `links`, and place objectives on the
 host that should complete the mission.
 
+## Music (optional)
+
+The frontend plays an optional per-mission track. There are two ways to attach
+one, checked in this order:
+
+1. **Explicit field** — set `music` on the mission to a WAV path relative to the
+   campaign directory. Put the file anywhere you like:
+
+   ```ron
+   Mission(
+       id: "op1",
+       name: "FIRST CONTACT",
+       music: Some("music/intro_theme.wav"),
+       // ...
+   )
+   ```
+
+2. **Naming convention** — if `music` is omitted, the frontend looks for
+   `music/mission_{N}_theme.wav` next to `campaign.ron` (`N` is the 1-based
+   mission number):
+
+   ```text
+   my_campaign/
+     campaign.ron
+     music/
+       mission_1_theme.wav
+       mission_2_theme.wav
+       ...
+   ```
+
+Tracks loop with a short fade-in and switch when the mission changes. Missions
+with neither an explicit file nor a convention file are silent. If there is no
+audio device the game runs silently; `--no-music` disables audio entirely. Only
+WAV is decoded. Audio is a frontend feature: the engine never touches it — the
+`music` field is just data it carries.
+
 ## Validation Invariants
 
 `--check` and tests expect campaigns to stay completable:
@@ -357,3 +538,40 @@ host that should complete the mission.
 - Any objective path points to a real VFS file.
 - The host that contains the objective provides a deterministic route to root,
   such as readable `privesc_key` loot.
+
+### `--doctor` semantic checks
+
+`--doctor` runs a deeper analysis than `--check` and prints errors and warnings.
+It exits non-zero if there are any **errors**. It reports at least:
+
+**Errors** (break the campaign):
+
+- Duplicate or empty mission IDs.
+- A campaign with no missions.
+- A `Mission.objective` (or `NetHost.objective`) that points to a path with no
+  file in that host's VFS.
+- A `Vulnerability.affected_service` port that is not among the host's `services`.
+- A `Service.requires` token that can never be obtained anywhere in the campaign.
+- Duplicate network hostnames, or `links` (pivot) references to hosts that do not
+  exist in the mission's network.
+- Duplicate achievement IDs.
+- Achievement triggers that reference a missing mission or an out-of-range
+  `ChooseEnding` choice.
+- Declarative-command effects/conditions that reference a missing achievement,
+  mission, or an invalid phase name.
+
+**Warnings** (smell wrong, still load):
+
+- Out-of-range `skill`, `root_difficulty`, `detection_limit`, `time_limit`, or
+  vulnerability `difficulty`.
+- `accepts_token` that is never obtainable (`login` will never work there).
+- Easter eggs, declarative commands, or terminal commands whose triggers collide
+  with built-in/system commands (they would be shadowed) or with each other.
+- Achievement `ReadFile` triggers whose path is not in any VFS.
+- Declarative `FlagSet(...)` conditions for a flag no command ever sets.
+- `TerminalCommand.exit` outside `0..=255`, or `{env:NAME}` templates referencing
+  a variable that is neither in `env` nor derived.
+
+The engine exposes this as `simterm_engine::validate_campaign(&Campaign, &reserved_verbs)`,
+so other tools can reuse it. The frontend passes its reserved built-in verbs so the
+engine stays independent of the terminal command set.

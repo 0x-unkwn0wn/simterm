@@ -826,7 +826,9 @@ pub fn fs_ls(state: &mut GameState, path: Option<String>) {
             }
         }
         filesystem::ListOutcome::File(name) => state.log(name),
-        filesystem::ListOutcome::NotFound => state.log(format!("ls: no existe la ruta '{arg}'")),
+        filesystem::ListOutcome::NotFound => state.log(format!(
+            "ls: cannot access '{arg}': No such file or directory"
+        )),
     }
 }
 
@@ -839,8 +841,10 @@ pub fn fs_cd(state: &mut GameState, path: Option<String>) {
     let comps = filesystem::normalize(&state.cwd, &arg);
     match filesystem::is_dir(&state.target.filesystem, &comps) {
         filesystem::DirCheck::Ok => state.cwd = comps,
-        filesystem::DirCheck::NotADir => state.log(format!("cd: '{arg}' no es un directorio")),
-        filesystem::DirCheck::NotFound => state.log(format!("cd: no existe la ruta '{arg}'")),
+        filesystem::DirCheck::NotADir => state.log(format!("bash: cd: {arg}: Not a directory")),
+        filesystem::DirCheck::NotFound => {
+            state.log(format!("bash: cd: {arg}: No such file or directory"))
+        }
     }
 }
 
@@ -885,8 +889,10 @@ pub fn fs_cat(state: &mut GameState, path: Option<String>) {
     let path_disp = filesystem::path_string(&comps);
 
     match filesystem::read_file(&state.target.filesystem, &comps) {
-        filesystem::ReadOutcome::NotFound => state.log(format!("cat: no existe '{arg}'")),
-        filesystem::ReadOutcome::IsDir => state.log(format!("cat: '{arg}' es un directorio")),
+        filesystem::ReadOutcome::NotFound => {
+            state.log(format!("cat: {arg}: No such file or directory"))
+        }
+        filesystem::ReadOutcome::IsDir => state.log(format!("cat: {arg}: Is a directory")),
         filesystem::ReadOutcome::File {
             content,
             root,
@@ -895,9 +901,7 @@ pub fn fs_cat(state: &mut GameState, path: Option<String>) {
             is_binary,
         } => {
             if root && !state.is_root {
-                state.log(format!(
-                    "cat: permiso denegado en {path_disp} (requiere root; usa 'privesc')"
-                ));
+                state.log(format!("cat: {path_disp}: Permission denied"));
                 return;
             }
 
@@ -1286,6 +1290,102 @@ pub fn local_enum(state: &mut GameState, tool: &str) {
     state.check_detection();
 }
 
+// ===================== COMANDOS DECLARATIVOS DE CAMPAÑA =====================
+//
+// Verbos definidos por la campaña en datos (`Campaign.commands`) con efectos
+// simples. Los EFECTOS viven aquí, en el runtime: el frontend solo despacha el
+// verbo. Así el motor sigue siendo el dueño del estado de juego.
+
+/// Traduce el nombre de fase de una condición a la `Phase` del motor.
+fn phase_from_name(name: &str) -> Option<Phase> {
+    match name.to_lowercase().as_str() {
+        "recon" => Some(Phase::Recon),
+        "enum" => Some(Phase::Enum),
+        "exploit" => Some(Phase::Exploit),
+        "post" => Some(Phase::Post),
+        _ => None,
+    }
+}
+
+/// ¿Se cumplen TODAS las condiciones del comando en el estado actual?
+fn command_available(state: &GameState, cmd: &crate::model::command::CampaignCommand) -> bool {
+    use crate::model::command::CommandCondition;
+    let mission_id = &state.campaign.missions[state.level_index].id;
+    cmd.conditions.iter().all(|c| match c {
+        CommandCondition::FlagSet(f) => state.has_flag(f),
+        CommandCondition::FlagNotSet(f) => !state.has_flag(f),
+        CommandCondition::Mission(m) => m == mission_id,
+        // Fase inválida => condición imposible => comando no disponible.
+        CommandCondition::Phase(p) => phase_from_name(p).is_some_and(|ph| state.phase_at_least(ph)),
+    })
+}
+
+/// Intenta ejecutar un comando declarativo de campaña para `verb`. Devuelve
+/// `true` si un comando coincidió y sus condiciones se cumplieron (aplicando sus
+/// líneas y efectos); `false` si no hay comando para ese verbo o no está
+/// disponible ahora (el frontend probará entonces con los easter eggs).
+pub fn campaign_command(state: &mut GameState, verb: &str) -> bool {
+    use crate::model::command::CommandEffect;
+
+    let Some(cmd) = state.campaign.command(verb).cloned() else {
+        return false;
+    };
+    if !command_available(state, &cmd) {
+        return false;
+    }
+
+    let clock = state.clock;
+    for line in &cmd.lines {
+        state.log(line.replace("{clock}", &clock.to_string()));
+    }
+
+    for effect in &cmd.effects {
+        match effect {
+            CommandEffect::AddLog(text) => {
+                state.log(text.replace("{clock}", &clock.to_string()));
+            }
+            CommandEffect::SetFlag(name) => {
+                state.set_flag(name);
+            }
+            CommandEffect::ClearFlag(name) => {
+                state.clear_flag(name);
+            }
+            CommandEffect::AddTrace(amount) => {
+                if *amount >= 0.0 {
+                    state.detection.add_noise(*amount);
+                    state.check_detection();
+                } else {
+                    state.detection.reduce(-*amount);
+                }
+            }
+            CommandEffect::UnlockAchievement(id) => {
+                state.unlock_campaign_achievement(id);
+            }
+            CommandEffect::CompleteMission => {
+                state.complete_level();
+            }
+        }
+    }
+    true
+}
+
+/// Ejecuta un comando de terminal autorado por la campaña (`Campaign.terminal`),
+/// puramente presentacional. Resuelve la salida según `arg_line`, la renderiza
+/// (plantillas + `$VAR`) y fija `$?` con su código de salida. Devuelve `true` si
+/// un comando coincidió.
+pub fn terminal_command(state: &mut GameState, verb: &str, arg_line: &str) -> bool {
+    let Some(cmd) = state.campaign.terminal_command(verb).cloned() else {
+        return false;
+    };
+    let lines: Vec<String> = cmd.resolve(arg_line).to_vec();
+    for line in &lines {
+        let rendered = crate::runtime::sysemu::render(state, line);
+        state.log(rendered);
+    }
+    state.last_exit = cmd.exit;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1503,6 +1603,7 @@ mod tests {
             endings,
             target,
             network,
+            music: None,
         }
     }
 
@@ -1516,6 +1617,10 @@ mod tests {
             fortunes: vec![],
             signals: vec![],
             achievements: vec![],
+            commands: vec![],
+            env: std::collections::BTreeMap::new(),
+            processes: vec![],
+            terminal: vec![],
             missions: vec![
                 mission(
                     "m0",
@@ -1590,6 +1695,97 @@ mod tests {
         g.resolve_ending(99);
         assert!(g.awaiting_choice);
         assert_eq!(g.outcome, None);
+    }
+
+    /// Un comando declarativo aplica sus efectos y respeta sus condiciones.
+    #[test]
+    fn comando_declarativo_aplica_efectos_y_condiciones() {
+        use crate::model::command::{CampaignCommand, CommandCondition, CommandEffect};
+        let mut g = demo_state();
+        g.campaign.commands = vec![CampaignCommand {
+            triggers: vec![String::from("inspect"), String::from("look")],
+            lines: vec![String::from("Inspeccionas la terminal.")],
+            effects: vec![
+                CommandEffect::SetFlag(String::from("inspected")),
+                CommandEffect::AddTrace(2.0),
+            ],
+            conditions: vec![],
+            hidden: false,
+        }];
+
+        // El alias 'look' dispara el mismo comando y aplica sus efectos.
+        assert!(campaign_command(&mut g, "look"));
+        assert!(g.has_flag("inspected"));
+        assert!(g.detection.detection >= 2.0);
+
+        // Un verbo sin comando declarativo no lo maneja el runtime.
+        assert!(!campaign_command(&mut g, "nope"));
+
+        // Condición FlagNotSet: con la flag ya puesta, el comando no está disponible.
+        g.campaign.commands = vec![CampaignCommand {
+            triggers: vec![String::from("secret")],
+            lines: vec![],
+            effects: vec![CommandEffect::SetFlag(String::from("done"))],
+            conditions: vec![CommandCondition::FlagNotSet(String::from("inspected"))],
+            hidden: true,
+        }];
+        assert!(!campaign_command(&mut g, "secret"));
+        assert!(!g.has_flag("done"));
+    }
+
+    /// Un comando de terminal autorado resuelve por argumento y fija `$?`.
+    #[test]
+    fn terminal_command_resuelve_args_y_fija_exit() {
+        use crate::model::terminal::TerminalCommand;
+        let mut g = demo_state();
+        g.campaign.terminal = vec![TerminalCommand {
+            triggers: vec![String::from("systemctl")],
+            output: vec![String::from("usage")],
+            args: vec![(
+                String::from("status nginx"),
+                vec![String::from("active (running) host={host}")],
+            )],
+            exit: 3,
+            hidden: false,
+        }];
+
+        // Coincidencia por argumento: renderiza plantilla y fija exit.
+        assert!(terminal_command(&mut g, "systemctl", "status nginx"));
+        assert!(g.logs.iter().any(|l| l.contains("active (running)")));
+        assert!(g.logs.iter().any(|l| l.contains("host=")));
+        assert_eq!(g.last_exit, 3);
+
+        // Sin coincidencia de argumento: cae en la salida por defecto.
+        assert!(terminal_command(&mut g, "systemctl", "reload"));
+        assert!(g.logs.iter().any(|l| l.contains("usage")));
+
+        // Verbo sin comando de terminal: no lo maneja.
+        assert!(!terminal_command(&mut g, "nope", ""));
+    }
+
+    /// El efecto `CompleteMission` cierra la misión cuando su condición se cumple.
+    #[test]
+    fn comando_declarativo_completa_mision_con_flag() {
+        use crate::model::command::{CampaignCommand, CommandCondition, CommandEffect};
+        let mut g = demo_state();
+        // Nos situamos en la última operación (sin objetivo, un host) para que
+        // `complete_level` abra la decisión final en vez de encadenar niveles.
+        g.campaign.commands = vec![CampaignCommand {
+            triggers: vec![String::from("detonate")],
+            lines: vec![],
+            effects: vec![CommandEffect::CompleteMission],
+            conditions: vec![CommandCondition::FlagSet(String::from("armed"))],
+            hidden: false,
+        }];
+
+        // Sin la flag 'armed', la condición falla y no ocurre nada.
+        assert!(!campaign_command(&mut g, "detonate"));
+        assert_eq!(g.level_index, 0);
+
+        // Con la flag puesta, el comando completa el nivel y avanza la campaña.
+        g.set_flag("armed");
+        assert!(campaign_command(&mut g, "detonate"));
+        assert!(g.level_index > 0 || g.outcome.is_some());
     }
 
     /// Barajar las vulnerabilidades conserva el multiconjunto de dificultades.

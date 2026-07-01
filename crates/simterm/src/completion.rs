@@ -11,47 +11,7 @@
 
 use simterm_engine::{filesystem, toolbox, GameState};
 
-/// Verbos base del juego (los nombres de herramienta se añaden aparte).
-const BASE_VERBS: &[&str] = &[
-    "help",
-    "target",
-    "nmap",
-    "sniff",
-    "connect",
-    "netmap",
-    "pivot",
-    "searchsploit",
-    "intel",
-    "exploit",
-    "login",
-    "privesc",
-    "loot",
-    "john",
-    "hashcat",
-    "strings",
-    "disasm",
-    "objdump",
-    "r2",
-    "solve",
-    "base64",
-    "xor",
-    "linpeas",
-    "sudo",
-    "suid",
-    "sysinfo",
-    "ls",
-    "cat",
-    "cd",
-    "pwd",
-    "find",
-    "whoami",
-    "cleanup",
-    "status",
-    "logs",
-    "clear",
-    "reset",
-    "quit",
-];
+use crate::registry;
 
 /// Resultado del autocompletado para una línea de entrada.
 pub enum Completion {
@@ -74,7 +34,7 @@ pub fn complete(state: &GameState, input: &str) -> Completion {
     let completing_verb = tokens.is_empty() || (tokens.len() == 1 && !ends_space);
 
     let candidates = if completing_verb {
-        verb_candidates(frag)
+        verb_candidates(state, frag)
     } else {
         arg_candidates(state, tokens[0], frag)
     };
@@ -120,10 +80,29 @@ fn finish(prefix: &str, frag: &str, mut cands: Vec<String>) -> Completion {
 
 // ----------------------------- Candidatos -----------------------------
 
-fn verb_candidates(frag: &str) -> Vec<String> {
-    let mut v: Vec<String> = BASE_VERBS.iter().map(|s| s.to_string()).collect();
-    for t in toolbox::TOOLS {
-        v.push(t.name.to_string());
+fn verb_candidates(state: &GameState, frag: &str) -> Vec<String> {
+    // Verbos built-in (nombres + alias) y herramientas, desde el registro único.
+    let mut v: Vec<String> = registry::all_verbs()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // Comandos declarativos de campaña no ocultos: se completan como cualquier otro.
+    for cmd in &state.campaign.commands {
+        if cmd.hidden {
+            continue;
+        }
+        for t in &cmd.triggers {
+            v.push(t.clone());
+        }
+    }
+    // Comandos de terminal autorados no ocultos.
+    for cmd in &state.campaign.terminal {
+        if cmd.hidden {
+            continue;
+        }
+        for t in &cmd.triggers {
+            v.push(t.clone());
+        }
     }
     v.retain(|c| c.starts_with(frag));
     v
@@ -134,7 +113,8 @@ fn arg_candidates(state: &GameState, verb: &str, frag: &str) -> Vec<String> {
     match verb.as_str() {
         // Rutas del sistema de archivos (solo con shell).
         "ls" | "dir" | "cat" | "read" | "type" | "cd" | "john" | "hashcat" | "strings"
-        | "disasm" | "objdump" | "r2" | "solve" | "base64" | "xor" => path_candidates(state, frag),
+        | "disasm" | "objdump" | "r2" | "solve" | "base64" | "xor" | "grep" | "head" | "tail"
+        | "wc" | "file" => path_candidates(state, frag),
         "sudo" => ["-l"]
             .iter()
             .filter(|c| c.starts_with(frag))

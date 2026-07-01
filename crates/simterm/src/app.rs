@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use simterm_engine::actions;
 use simterm_engine::{Campaign, GameOutcome, GameState};
 
+use crate::audio::Audio;
 use crate::command::{self, Command};
 use crate::completion::{self, Completion};
 use crate::effects::{Effect, EffectKind};
@@ -49,11 +50,14 @@ pub struct App {
     last_tick: Instant,
     /// Tiempo acumulado desde el último frame de animación.
     tick_accum: Duration,
+    /// Subsistema de audio (música por misión). `None` si va en silencio.
+    audio: Option<Audio>,
 }
 
 impl App {
-    /// Construye la aplicación a partir de una campaña ya cargada.
-    pub fn new(campaign: Campaign) -> Self {
+    /// Construye la aplicación a partir de una campaña ya cargada y un subsistema
+    /// de audio opcional (la música por misión; `None` = silencio).
+    pub fn new(campaign: Campaign, audio: Option<Audio>) -> Self {
         // Si hay progreso guardado, reanuda la campaña en su nivel antes de
         // construir el briefing de arranque.
         let mut game = GameState::new(campaign);
@@ -83,11 +87,25 @@ impl App {
             mastermind: None,
             last_tick: Instant::now(),
             tick_accum: Duration::ZERO,
+            audio,
         };
         // Tras el arranque, el briefing de la operación activa (1ª o reanudada).
         let brief = app.briefing_effect(start_level);
         app.effect_queue.push_back(brief);
+        // Arranca la pista de la misión activa (si hay audio).
+        app.sync_audio();
         app
+    }
+
+    /// Sincroniza la música con la misión activa. No hace nada si no hay audio o
+    /// si ya suena la pista correcta. Usa la pista declarada por la misión
+    /// (`Mission.music`) si existe; si no, la convención por nombre.
+    fn sync_audio(&mut self) {
+        if let Some(audio) = self.audio.as_mut() {
+            let level = self.game.level_index;
+            let track = self.game.campaign.missions[level].music.clone();
+            audio.set_level(level, track.as_deref());
+        }
     }
 
     /// Construye el efecto de briefing (typewriter) de una operación.
@@ -384,6 +402,9 @@ impl App {
         self.dispatch(cmd);
 
         self.trigger_transition(prev_level, prev_outcome);
+
+        // Si el comando cambió de misión (o reinició), ajusta la música.
+        self.sync_audio();
     }
 
     /// Dispara la animación adecuada si el comando cambió de operación o terminó
@@ -461,7 +482,6 @@ impl App {
             Command::Cd(path) => actions::fs_cd(&mut self.game, path),
             Command::Pwd => actions::fs_pwd(&mut self.game),
             Command::Find(needle) => actions::fs_find(&mut self.game, needle),
-            Command::Whoami => self.cmd_whoami(),
             Command::Cleanup => actions::cleanup(&mut self.game),
             Command::Reset => self.game.reset_campaign(),
             Command::Choose(n) => match n {
@@ -474,7 +494,12 @@ impl App {
             Command::Logs => self.cmd_logs(),
             Command::Achievements => self.cmd_achievements(),
             Command::Quit => self.game.running = false,
-            Command::Echo(text) => self.game.log(text),
+            Command::Shell { verb, args } => self.cmd_shell(verb, args),
+            Command::Echo(text) => {
+                // `echo` expande variables de entorno ($VAR, ${VAR}, $?).
+                let line = simterm_engine::sysemu::expand_vars(&self.game, &text);
+                self.game.log(line);
+            }
             Command::Fortune => self.cmd_fortune(),
             Command::Signal => self.cmd_signal(),
             Command::Decode(text) => self.cmd_decode(text),
@@ -487,8 +512,44 @@ impl App {
             Command::BadId(raw) => self.game.log(format!(
                 "Id inválido: '{raw}'. Uso: searchsploit <id> | exploit <id>."
             )),
-            // Verbo no reconocido: puede ser un easter egg definido por la campaña.
-            Command::Unknown(verb) => self.cmd_easter(&verb),
+            // Verbo no reconocido: se prueba (en orden) comando declarativo con
+            // efectos, comando de terminal autorado, easter egg de sabor y, si
+            // nada casa, se responde con el `command not found` de una shell real.
+            Command::Unknown { verb, args } => self.cmd_unknown(verb, args),
         }
+    }
+
+    /// Comando de sistema emulado: delega en el motor (`sysemu`) y refleja su
+    /// salida y código de retorno (`$?`).
+    fn cmd_shell(&mut self, verb: String, args: Vec<String>) {
+        match simterm_engine::sysemu::run(&mut self.game, &verb, &args) {
+            Some(out) => {
+                for line in out.lines {
+                    self.game.log(line);
+                }
+                self.game.last_exit = out.exit;
+            }
+            None => {
+                self.game.log(format!("bash: {verb}: command not found"));
+                self.game.last_exit = 127;
+            }
+        }
+    }
+
+    /// Verbo no reconocido: comando declarativo → comando de terminal autorado →
+    /// easter egg → `command not found` (tono de shell real).
+    fn cmd_unknown(&mut self, verb: String, args: Vec<String>) {
+        if actions::campaign_command(&mut self.game, &verb) {
+            return;
+        }
+        let arg_line = args.join(" ");
+        if actions::terminal_command(&mut self.game, &verb, &arg_line) {
+            return;
+        }
+        if self.try_easter(&verb) {
+            return;
+        }
+        self.game.log(format!("bash: {verb}: command not found"));
+        self.game.last_exit = 127;
     }
 }

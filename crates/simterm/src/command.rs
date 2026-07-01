@@ -53,8 +53,6 @@ pub enum Command {
     Cd(Option<String>),
     Pwd,
     Find(Option<String>),
-    /// Identidad de la sesión actual.
-    Whoami,
     /// Encubrimiento activo: baja la traza con coste y riesgo.
     Cleanup,
     /// Reinicia la campaña (borra el guardado).
@@ -66,13 +64,24 @@ pub enum Command {
     Achievements,
     Clear,
     Quit,
+    /// Comando de sistema emulado (uname, ps, netstat, env, grep...). El motor lo
+    /// interpreta a partir del estado del host; `args` son los tokens tras el verbo.
+    Shell {
+        verb: String,
+        args: Vec<String>,
+    },
     /// Puerto no numérico en un comando de enumeración.
     BadPort(String),
     /// Id no numérico en research/exploit.
     BadId(String),
-    /// Verbo no reconocido: el dispatcher comprueba si es un easter egg de la
-    /// campaña antes de declararlo desconocido.
-    Unknown(String),
+    /// Verbo no reconocido: el dispatcher comprueba si es un comando declarativo,
+    /// un comando de terminal autorado o un easter egg antes de declararlo
+    /// desconocido (`command not found`). `args` permite resolver comandos con
+    /// argumentos (p. ej. `systemctl status nginx`).
+    Unknown {
+        verb: String,
+        args: Vec<String>,
+    },
     Empty,
 
     // --- Minijuegos (mecánica genérica del motor; el CONTENIDO es de campaña) ---
@@ -101,6 +110,12 @@ pub fn parse(input: &str) -> Command {
     let mut parts = trimmed.split_whitespace();
     let verb = parts.next().unwrap_or("").to_lowercase();
     let arg = parts.next();
+    // Todos los tokens tras el verbo (para los comandos de sistema/terminal).
+    let all_args: Vec<String> = trimmed
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_string)
+        .collect();
     // Todo lo que sigue al primer token (para echo / decode multipalabra).
     let rest = trimmed
         .splitn(2, char::is_whitespace)
@@ -159,7 +174,6 @@ pub fn parse(input: &str) -> Command {
         "cd" => Command::Cd(arg.map(str::to_string)),
         "pwd" => Command::Pwd,
         "find" => Command::Find(arg.map(str::to_string)),
-        "whoami" | "id" => Command::Whoami,
         "cleanup" | "covertracks" | "cleanlogs" => Command::Cleanup,
         "reset" | "newgame" => Command::Reset,
         "choose" | "deliver" => Command::Choose(arg.and_then(|s| s.parse::<usize>().ok())),
@@ -182,12 +196,46 @@ pub fn parse(input: &str) -> Command {
         other => {
             if toolbox::tool_by_name(other).is_some() {
                 parse_enum(other, arg)
+            } else if is_system_verb(other) {
+                // Comando de sistema emulado (uname, ps, netstat, grep...).
+                Command::Shell {
+                    verb: other.to_string(),
+                    args: all_args,
+                }
             } else {
-                // Puede ser un easter egg de la campaña; lo decide el dispatcher.
-                Command::Unknown(other.to_string())
+                // Puede ser un comando declarativo/terminal o un easter egg; lo
+                // decide el dispatcher. Si nada casa: command not found.
+                Command::Unknown {
+                    verb: other.to_string(),
+                    args: all_args,
+                }
             }
         }
     }
+}
+
+/// Verbos de sistema emulados por el motor (`runtime::sysemu`). El parser los
+/// enruta a `Command::Shell`; el motor sintetiza su salida desde el estado.
+fn is_system_verb(verb: &str) -> bool {
+    matches!(
+        verb,
+        "uname"
+            | "hostname"
+            | "id"
+            | "whoami"
+            | "ps"
+            | "netstat"
+            | "ss"
+            | "ifconfig"
+            | "ip"
+            | "env"
+            | "export"
+            | "grep"
+            | "head"
+            | "tail"
+            | "wc"
+            | "file"
+    )
 }
 
 fn parse_enum(tool: &str, arg: Option<&str>) -> Command {

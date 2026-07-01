@@ -145,6 +145,58 @@ impl App {
         for line in rest {
             lines.push(line.to_string());
         }
+
+        // Referencia rápida de comandos, generada desde el registro único
+        // (`registry::reference_lines`): alias, uso y naturaleza de cada built-in.
+        lines.push(match lang {
+            Language::Es => {
+                String::from("--- REFERENCIA RÁPIDA (desde el registro de comandos) ---")
+            }
+            Language::En => String::from("--- QUICK REFERENCE (from the command registry) ---"),
+        });
+        lines.extend(crate::registry::reference_lines());
+
+        // Comandos declarativos definidos por la campaña (no ocultos). Su metadata
+        // vive en los datos de la campaña, no en el registro de built-ins.
+        let campaign_cmds: Vec<String> = self
+            .game
+            .campaign
+            .commands
+            .iter()
+            .filter(|c| !c.hidden && !c.triggers.is_empty())
+            .map(|c| {
+                let verbs = c.triggers.join(", ");
+                match c.lines.first() {
+                    Some(first) => format!("  {verbs:<20} - {first}"),
+                    None => format!("  {verbs}"),
+                }
+            })
+            .collect();
+        if !campaign_cmds.is_empty() {
+            lines.push(match lang {
+                Language::Es => String::from("[CAMPAÑA] (comandos definidos por esta campaña)"),
+                Language::En => String::from("[CAMPAIGN] (commands defined by this campaign)"),
+            });
+            lines.extend(campaign_cmds);
+        }
+
+        // Comandos de terminal autorados (no ocultos): sabor de shell de la campaña.
+        let terminal_cmds: Vec<String> = self
+            .game
+            .campaign
+            .terminal
+            .iter()
+            .filter(|c| !c.hidden && !c.triggers.is_empty())
+            .map(|c| format!("  {}", c.triggers.join(", ")))
+            .collect();
+        if !terminal_cmds.is_empty() {
+            lines.push(match lang {
+                Language::Es => String::from("[TERMINAL] (comandos de shell de esta campaña)"),
+                Language::En => String::from("[TERMINAL] (shell commands of this campaign)"),
+            });
+            lines.extend(terminal_cmds);
+        }
+
         for l in lines {
             self.game.log(l);
         }
@@ -222,24 +274,6 @@ impl App {
         for r in rows {
             self.game.log(r);
         }
-    }
-
-    pub(super) fn cmd_whoami(&mut self) {
-        let line = if !self.game.has_foothold() {
-            String::from("operador — sesión anónima (sin host comprometido).")
-        } else {
-            let host = self
-                .game
-                .target
-                .hostname
-                .split('.')
-                .next()
-                .unwrap_or("host")
-                .to_string();
-            let user = if self.game.is_root { "root" } else { "user" };
-            format!("{user}@{host}  (sesión en el host objetivo)")
-        };
-        self.game.log(line);
     }
 
     pub(super) fn cmd_status(&mut self) {

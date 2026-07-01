@@ -29,23 +29,28 @@ pub mod asset;
 pub mod loader;
 pub mod model;
 pub mod runtime;
+pub mod validate;
 
 // --- Re-exports de conveniencia para los frontends ---
 
 pub use model::campaign::{Campaign, CampaignAchievement, CampaignAchievementTrigger};
+pub use model::command::{CampaignCommand, CommandCondition, CommandEffect};
 pub use model::filesystem::{self, FsNode, Loot};
 pub use model::intel::{FindingSource, FindingStatus, IntelFinding};
 pub use model::language::{EngineText, Language};
 pub use model::mission::{Ending, EntryVector, Mission, NetHost};
 pub use model::target::{Service, TargetNode, Vulnerability};
+pub use model::terminal::TerminalCommand;
 pub use model::theme::{EasterEgg, Theme};
 pub use model::toolbox::{self, EnumTool, ServiceCat};
 
 pub use runtime::actions;
 pub use runtime::state::{AchievementId, GameOutcome, GameState, Phase, ACHIEVEMENTS};
+pub use runtime::sysemu::{self, ShellOutput};
 
 pub use asset::{AssetSource, DirAssetSource, MemAssetSource, NoAssets};
 pub use loader::{load_campaign, load_open_campaign, LoadError, OpenCampaign};
+pub use validate::{validate_campaign, ValidationIssue, ValidationReport};
 
 #[cfg(test)]
 mod loader_tests {

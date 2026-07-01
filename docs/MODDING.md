@@ -14,7 +14,10 @@ cp -r examples/sample_campaign campaigns/my_campaign
 Edit `campaigns/my_campaign/campaign.ron`, then validate it:
 
 ```bash
+# Quick load check:
 cargo run -p simterm -- --check --campaign ./campaigns/my_campaign
+# Deeper semantic check (dangling refs, unreachable content, bad ranges):
+cargo run -p simterm -- --doctor --campaign ./campaigns/my_campaign
 ```
 
 Run it:
@@ -165,7 +168,26 @@ Use campaign data for all story and identity:
 
 Do not add story-specific branches to Rust code.
 
-## 8. Offline Analysis and Reversing Puzzles
+## 8. Custom Commands, Terminal Realism, and Music
+
+You can add behavior in data, without Rust:
+
+- **`commands`** — declarative commands that *change state*: `SetFlag`,
+  `ClearFlag`, `AddTrace`, `UnlockAchievement`, `CompleteMission`, gated by
+  conditions (`FlagSet`, `Mission`, `Phase`, ...). Good for puzzles and branches.
+- **`terminal`** — authored realistic shell commands for fictional CLIs
+  (`systemctl`, banners), with per-argument output, templates (`{host}`,
+  `{env:X}`, `$VAR`), and an exit code. Presentational only.
+- **`env`** and **`processes`** — flesh out a believable box. The engine already
+  synthesizes `uname`, `id`, `ps`, `netstat`, `ifconfig`, `env`, `grep`,
+  `head`/`tail`, `wc`, and `file` from your host definition, and unknown verbs
+  return `bash: x: command not found`.
+- **Music** — set a mission's `music:` field, or drop
+  `music/mission_N_theme.wav` next to `campaign.ron`. Disable with `--no-music`.
+
+Full reference and templates: [CAMPAIGN_FORMAT.md](CAMPAIGN_FORMAT.md).
+
+## 9. Offline Analysis and Reversing Puzzles
 
 For deeper terminal interactions, use the advanced VFS fields documented in
 [CAMPAIGN_FORMAT.md](CAMPAIGN_FORMAT.md):
@@ -178,15 +200,17 @@ For deeper terminal interactions, use the advanced VFS fields documented in
 - `TargetNode.local_privesc` plus `linpeas`, `sudo -l`, `suid`, or `sysinfo`
   for discoverable local escalation vectors.
 
-## 9. Validate Often
+## 10. Validate Often
 
-Run `--check` whenever you change structure:
+Run `--check` for a quick load, and `--doctor` for a deeper semantic pass
+(dangling references, unreachable content, collisions, out-of-range values):
 
 ```bash
-cargo run -p simterm -- --check --campaign ./campaigns/my_campaign
+cargo run -p simterm -- --check  --campaign ./campaigns/my_campaign
+cargo run -p simterm -- --doctor --campaign ./campaigns/my_campaign
 ```
 
-Common issues:
+`--doctor` prints errors and warnings and exits non-zero on errors. Common issues:
 
 | Symptom | Likely cause |
 |---|---|
@@ -194,9 +218,10 @@ Common issues:
 | Objective is not a file | `objective` does not match an actual VFS path. |
 | Mission cannot complete | The objective host lacks a deterministic root route. |
 | Entry route is too punishing | Only viable vulnerability is too difficult or too noisy. |
-| Easter egg does not trigger | Trigger collides with a built-in command or is missing from `triggers`. |
+| Command/easter egg does not trigger | Trigger collides with a built-in or system command, or is missing from `triggers`. |
+| Achievement never unlocks | Trigger references a missing mission, file, or ending. |
 
-## 10. Publishing a Campaign
+## 11. Publishing a Campaign
 
 Distribute your campaign as a directory containing `campaign.ron` and any
 campaign-adjacent assets you choose to support. Players run it with:
