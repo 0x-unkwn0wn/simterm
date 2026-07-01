@@ -1,0 +1,21 @@
+# Workspace root: reusable framework runtime plus the playable terminal
+# frontend. Campaign content is loaded at runtime from a campaign path.
+[workspace]
+members = ["crates/engine", "crates/simterm"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/0x-unkwn0wn/simterm"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.8"
+rand = "0.8"
+ratatui = "0.29"
+crossterm = "0.28"
+
+[profile.release]
+opt-level = 3

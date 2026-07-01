@@ -1,0 +1,19 @@
+# simterm-engine: reusable framework runtime with no terminal UI dependency and
+# no built-in campaign content. It interprets any campaign that follows the data
+# format documented in docs/CAMPAIGN_FORMAT.md.
+[package]
+name = "simterm-engine"
+description = "Framework runtime for building immersive terminal-based games and experiences."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "simterm_engine"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+ron.workspace = true
+rand.workspace = true

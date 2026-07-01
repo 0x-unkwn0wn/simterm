@@ -1,0 +1,20 @@
+# simterm: playable terminal frontend. It connects the framework runtime to the
+# terminal UI (ratatui/crossterm) and resolves which campaign to load from the
+# CLI (--campaign).
+[package]
+name = "simterm"
+description = "Terminal frontend and CLI for SimTerm experiences."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "simterm"
+path = "src/main.rs"
+
+[dependencies]
+simterm-engine = { path = "../engine" }
+ratatui.workspace = true
+crossterm.workspace = true
+rand.workspace = true

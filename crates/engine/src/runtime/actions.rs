@@ -1,0 +1,2139 @@
+//! Acciones del jugador organizadas por fases de la kill chain:
+//! RECON (nmap) → ENUM (toolbox por servicio) → EXPLOIT → POST (privesc/loot).
+//!
+//! El modelo de información imperfecta vive en la enumeración: cada herramienta
+//! tiene afinidad por un tipo de servicio; la adecuada revela vulnerabilidades
+//! reales con poco ruido, la inadecuada genera ruido y falsos positivos.
+
+use crate::model::filesystem::{self, Reward};
+use crate::model::intel::{FindingSource, FindingStatus};
+use crate::model::language::Language;
+use crate::model::mission::EntryVector;
+use crate::model::target::{ExploitReliability, LocalKind};
+use crate::model::toolbox::{self, EnumTool};
+use crate::runtime::balance;
+use crate::runtime::probability::{clamp01, index, range, roll};
+use crate::runtime::state::{AchievementId, GameState, Phase};
+
+const FALSE_TITLES_ES: &[&str] = &[
+    "Cabecera HTTP insegura detectada",
+    "Banner de servicio sospechoso",
+    "Posible directorio listable",
+    "Cifrado TLS débil reportado",
+    "Cuenta por defecto potencialmente activa",
+    "Versión obsoleta inferida del banner",
+    "Respuesta anómala a paquete malformado",
+    "Servicio expuesto sin autenticación aparente",
+];
+
+const FALSE_TITLES_EN: &[&str] = &[
+    "Insecure HTTP header detected",
+    "Suspicious service banner",
+    "Possible listable directory",
+    "Weak TLS encryption reported",
+    "Potentially active default account",
+    "Outdated version inferred from banner",
+    "Anomalous response to malformed packet",
+    "Service exposed without apparent authentication",
+];
+
+fn false_positive_title(language: Language) -> String {
+    let titles = match language {
+        Language::Es => FALSE_TITLES_ES,
+        Language::En => FALSE_TITLES_EN,
+    };
+    titles[index(titles.len())].to_string()
+}
+
+// ============================ FASE RECON ============================
+
+/// `nmap`: descubre los servicios expuestos del host (puertos, nombre, versión).
+/// No genera hallazgos de vulnerabilidad; habilita la fase de enumeración.
+pub fn recon(state: &mut GameState) {
+    let lang = state.campaign.language;
+    // El objetivo tras un bastión es inalcanzable hasta pivotar.
+    if matches!(state.entry, EntryVector::Pivot { .. }) && !state.pivoted {
+        state.log(String::from(
+            "[nmap] Host inalcanzable: el objetivo está tras un bastión. Pivota con 'connect' primero.",
+        ));
+        return;
+    }
+
+    state.advance_clock(balance::NMAP_TIME);
+    state.detection.add_noise(balance::NMAP_NOISE);
+    // En operaciones sigilosas, el escaneo activo deja rastro extra.
+    if matches!(state.entry, EntryVector::Passive) {
+        state.detection.add_noise(balance::PASSIVE_NMAP_PENALTY);
+        state.log(String::from(
+            "[nmap] AVISO: objetivo monitorizado; el escaneo activo deja rastro extra. 'sniff' es más sigiloso.",
+        ));
+    }
+    state.log(String::from("[nmap] Escaneando host objetivo..."));
+
+    let services = state.target.services.clone();
+    let mut nuevos = 0;
+    for s in &services {
+        if state.discover_port(s.port) {
+            nuevos += 1;
+            let cat = toolbox::category(&s.name);
+            state.log(format!(
+                "[nmap] {:>5}/tcp open  {:<6} {}   [{}]",
+                s.port,
+                s.name,
+                s.version,
+                cat.label_in(lang)
+            ));
+        }
+    }
+
+    if nuevos == 0 {
+        state.log(String::from(
+            "[nmap] Sin servicios nuevos; el host ya estaba mapeado.",
+        ));
+    } else {
+        state.log(format!(
+            "[nmap] {nuevos} servicio(s) descubierto(s). Enumera cada uno con la herramienta adecuada."
+        ));
+    }
+
+    state.reach_phase(Phase::Enum);
+    state.check_detection();
+}
+
+/// `sniff`: interceptación pasiva de tráfico. Muy sigiloso pero lento: revela
+/// los servicios de uno en uno, los que "emiten". Alternativa silenciosa a
+/// `nmap` y vía de entrada de las operaciones pasivas.
+pub fn sniff(state: &mut GameState) {
+    let lang = state.campaign.language;
+    if matches!(state.entry, EntryVector::Pivot { .. }) && !state.pivoted {
+        state.log(String::from(
+            "[sniff] Sin enlace al objetivo: está tras un bastión. Pivota con 'connect' primero.",
+        ));
+        return;
+    }
+
+    state.advance_clock(balance::SNIFF_TIME); // pasivo: más lento que un escaneo activo
+    state.detection.add_noise(balance::SNIFF_NOISE); // pero casi sin rastro
+
+    let next = state
+        .target
+        .services
+        .iter()
+        .find(|s| !state.discovered_ports.contains(&s.port))
+        .cloned();
+
+    match next {
+        Some(s) => {
+            state.discover_port(s.port);
+            let cat = toolbox::category(&s.name);
+            state.log(format!(
+                "[sniff] Tráfico interceptado: {:>5}/tcp  {:<6} {}   [{}]",
+                s.port,
+                s.name,
+                s.version,
+                cat.label_in(lang)
+            ));
+            state.log(String::from(
+                "[sniff] Servicio identificado. Repite 'sniff' para captar más, o enumera este.",
+            ));
+        }
+        None => {
+            state.log(String::from(
+                "[sniff] Sin tráfico nuevo: todos los servicios del host ya están mapeados.",
+            ));
+        }
+    }
+
+    if !state.discovered_ports.is_empty() {
+        state.reach_phase(Phase::Enum);
+    }
+    state.check_detection();
+}
+
+/// `connect [host]`: pivota a través de un bastión. Solo tiene efecto en las
+/// operaciones con entrada `Pivot`; habilita el reconocimiento del objetivo.
+pub fn connect(state: &mut GameState, host: Option<String>) {
+    let gateway = match &state.entry {
+        EntryVector::Pivot { gateway } => gateway.clone(),
+        _ => {
+            state.log(String::from(
+                "[connect] Esta operación no atraviesa ningún bastión.",
+            ));
+            return;
+        }
+    };
+
+    if state.pivoted {
+        state.log(String::from("[connect] El túnel ya está establecido."));
+        return;
+    }
+
+    state.advance_clock(balance::CONNECT_TIME);
+    state.detection.add_noise(balance::CONNECT_NOISE);
+    state.pivoted = true;
+
+    let via = host.unwrap_or(gateway);
+    state.log(format!("[connect] Pivotando a través de '{via}'..."));
+    state.log(String::from(
+        "[connect] Túnel establecido. El objetivo es alcanzable: escanea con 'nmap' o 'sniff'.",
+    ));
+    state.check_detection();
+}
+
+// ============================ FASE ENUM =============================
+
+/// Ejecuta una herramienta de enumeración sobre un puerto concreto.
+pub fn enumerate(state: &mut GameState, tool_name: &str, port: Option<u16>) {
+    let lang = state.campaign.language;
+    if !state.phase_at_least(Phase::Enum) {
+        state.log(String::from(
+            "Aún no has descubierto servicios. Empieza con 'nmap'.",
+        ));
+        return;
+    }
+
+    let tool = match toolbox::tool_by_name(tool_name) {
+        Some(t) => t,
+        None => {
+            state.log(format!(
+                "Herramienta desconocida: '{tool_name}'. Mira 'help'."
+            ));
+            return;
+        }
+    };
+
+    let port = match port {
+        Some(p) => p,
+        None => {
+            state.log(format!(
+                "Indica un puerto: {} <puerto>  (ej. {} 80)",
+                tool.name, tool.name
+            ));
+            return;
+        }
+    };
+
+    // El servicio debe haberse descubierto antes (en RECON).
+    let service = state
+        .target
+        .services
+        .iter()
+        .find(|s| s.port == port)
+        .cloned();
+    let service = match service {
+        Some(s) if state.is_port_discovered(port) => s,
+        Some(_) => {
+            state.log(format!(
+                "El puerto {port} no se ha descubierto todavía. Ejecuta 'nmap' primero."
+            ));
+            return;
+        }
+        None => {
+            state.log(format!("No hay ningún servicio en el puerto {port}."));
+            return;
+        }
+    };
+
+    // Gating de credenciales: un servicio puede exigir una credencial recogida
+    // en otro host. Sin ella, el escaneo lo ve pero la enumeración rebota. No
+    // cuesta reloj ni ruido: es un rechazo de acceso, no una acción ruidosa.
+    if let Some(tok) = &service.requires {
+        if !state.foothold_tokens.contains(tok) {
+            state.log(format!(
+                "[{}] {}/{} exige autenticación previa: acceso denegado. Consigue la credencial en otro punto de la red.",
+                tool_name, port, service.name
+            ));
+            return;
+        }
+    }
+
+    let cat = toolbox::category(&service.name);
+    let matched = tool.matches(cat);
+
+    state.advance_clock(tool.time);
+    state.detection.add_noise(tool.noise);
+    state.log(format!(
+        "[{}] Enumerando {}/{} ({})...",
+        tool.name, port, service.name, service.version
+    ));
+    if !tool.is_generic() && !matched {
+        state.log(format!(
+            "[{}] Herramienta poco adecuada para un servicio {}: resultados pobres y ruidosos.",
+            tool.name,
+            cat.label_in(lang)
+        ));
+    }
+
+    let hit = if tool.is_generic() {
+        tool.hit_match
+    } else if matched {
+        tool.hit_match
+    } else {
+        tool.hit_other
+    };
+
+    // Vulnerabilidades reales de ESTE servicio aún sin hallazgo.
+    let candidates: Vec<_> = state
+        .target
+        .vulnerabilities
+        .iter()
+        .filter(|v| v.affected_service == port)
+        .cloned()
+        .collect();
+
+    let mut real_hits = 0;
+    for v in &candidates {
+        if state.has_finding_for(&v.id) {
+            continue;
+        }
+        if roll(hit) {
+            let title = format!("Posible {} en {}", v.name, service.name);
+            let conf = range(tool.conf.0, tool.conf.1);
+            let id = state.push_finding(title, conf, source_of(tool), Some(v.id.clone()));
+            state.log(format!("[{}] Hallazgo #{id}: {}", tool.name, v.name));
+            real_hits += 1;
+        }
+    }
+
+    // Falsos positivos: más probables cuando la herramienta no encaja.
+    let fp_prob = if matched {
+        tool.fp_match
+    } else {
+        tool.fp_other
+    };
+    let mut fp = 0;
+    if roll(fp_prob) {
+        fp += 1;
+    }
+    if !matched && roll(0.4) {
+        fp += 1;
+    }
+    for _ in 0..fp {
+        let conf = range(tool.conf.0, tool.conf.1 * 0.9);
+        let id = state.push_finding(false_positive_title(lang), conf, source_of(tool), None);
+        state.log(format!("[{}] Hallazgo #{id} (sin confirmar)", tool.name));
+    }
+
+    if real_hits == 0 && fp == 0 {
+        state.log(format!(
+            "[{}] Sin resultados destacables en este servicio.",
+            tool.name
+        ));
+    }
+
+    if !state.intel.is_empty() {
+        state.reach_phase(Phase::Exploit);
+    }
+    state.check_detection();
+}
+
+fn source_of(tool: &EnumTool) -> FindingSource {
+    // El reparto exacto da igual a nivel jugable; refleja "lo profundo" del tooling.
+    if tool.noise >= 10.0 {
+        FindingSource::DeepScan
+    } else if tool.is_generic() {
+        FindingSource::PortScan
+    } else {
+        FindingSource::DeepScan
+    }
+}
+
+/// `searchsploit`/`verify`: investiga un hallazgo para confirmarlo o descartarlo.
+/// Es trabajo local: poco ruido, pero su precisión NO es perfecta.
+pub fn research(state: &mut GameState, public_id: usize) {
+    if !state.phase_at_least(Phase::Enum) {
+        state.log(String::from(
+            "Primero enumera servicios para tener hallazgos.",
+        ));
+        return;
+    }
+
+    state.advance_clock(balance::RESEARCH_TIME);
+    state.detection.add_noise(balance::RESEARCH_NOISE); // local, casi sin ruido de red
+
+    let is_real = match state.find(public_id) {
+        Some(f) => f.is_real(),
+        None => {
+            state.log(format!(
+                "[searchsploit] No existe ningún hallazgo con id #{public_id}."
+            ));
+            return;
+        }
+    };
+
+    // Cada lectura es independiente (78% acierto). En vez de fijar la confianza
+    // a un extremo, se ACUMULAN lecturas: el consenso de varias investigaciones
+    // converge a la verdad y la confianza se ajusta sin colapsar. Así un solo
+    // mal veredicto no inutiliza un hallazgo real: basta con re-verificar.
+    let correct = roll(balance::RESEARCH_ACCURACY);
+    let reads_true = if correct { is_real } else { !is_real };
+
+    let (pos, neg) = if let Some(f) = state.find_mut(public_id) {
+        if reads_true {
+            f.verify_pos += 1;
+        } else {
+            f.verify_neg += 1;
+        }
+        f.confidence = consensus_confidence(f.verify_pos, f.verify_neg);
+        f.status = if f.verify_pos > f.verify_neg {
+            FindingStatus::VerifiedTrue
+        } else if f.verify_neg > f.verify_pos {
+            FindingStatus::VerifiedFalse
+        } else {
+            FindingStatus::Unverified
+        };
+        (f.verify_pos, f.verify_neg)
+    } else {
+        (0, 0)
+    };
+
+    let label = if reads_true {
+        "exploit público plausible (parece REAL)"
+    } else {
+        "sin exploit fiable (parece FALSO POSITIVO)"
+    };
+    state.log(format!(
+        "[searchsploit] Hallazgo #{public_id}: {label}. Consenso {pos} a favor / {neg} en contra."
+    ));
+    if pos == neg {
+        state.log(String::from(
+            "[searchsploit] Lecturas empatadas: no concluyente. Investiga otra vez para desempatar.",
+        ));
+    }
+    state.check_detection();
+}
+
+/// Confianza por consenso de lecturas (suavizado de Laplace), acotada a
+/// [0.10, 0.90] para que ni un solo veredicto la lleve a los extremos.
+fn consensus_confidence(pos: u8, neg: u8) -> f32 {
+    let p = pos as f32;
+    let n = neg as f32;
+    clamp01(((p + 1.0) / (p + n + 2.0)).clamp(balance::CONF_MIN, balance::CONF_MAX))
+}
+
+// =========================== FASE EXPLOIT ===========================
+
+/// `exploit <id>`: intenta explotar un hallazgo. Éxito => foothold (fase POST).
+pub fn exploit(state: &mut GameState, public_id: usize) {
+    if !state.phase_at_least(Phase::Exploit) {
+        state.log(String::from(
+            "Aún no tienes hallazgos que explotar. Enumera servicios primero.",
+        ));
+        return;
+    }
+
+    state.advance_clock(balance::EXPLOIT_TIME);
+
+    let info = state.find(public_id).map(|f| {
+        (
+            f.real_vuln_id.clone(),
+            f.confidence,
+            matches!(f.status, FindingStatus::Exploited),
+        )
+    });
+
+    let (real_vuln_id, confidence, already) = match info {
+        Some(t) => t,
+        None => {
+            state.log(format!(
+                "[exploit] No existe ningún hallazgo con id #{public_id}."
+            ));
+            return;
+        }
+    };
+
+    if already {
+        state.log(format!(
+            "[exploit] El hallazgo #{public_id} ya fue explotado."
+        ));
+        return;
+    }
+
+    let skill = state.effective_skill();
+
+    match real_vuln_id {
+        None => {
+            state.detection.add_noise(balance::EXPLOIT_FALSEPOS_NOISE);
+            if let Some(f) = state.find_mut(public_id) {
+                f.status = FindingStatus::Failed;
+            }
+            state.log(format!(
+                "[exploit] Hallazgo #{public_id}: era un FALSO POSITIVO. El exploit rebota y dispara alarmas (+25 ruido)."
+            ));
+            state.check_detection();
+        }
+        Some(vuln_id) => {
+            let vuln = state.target.vuln_by_id(&vuln_id).cloned();
+            let Some(vuln) = vuln else {
+                state.log(format!(
+                    "[exploit] Error interno: vulnerabilidad {vuln_id} no encontrada."
+                ));
+                return;
+            };
+
+            state.detection.add_noise(vuln.stealth_cost as f32);
+
+            let diff_norm = vuln.difficulty as f32 / 10.0;
+            let p = clamp01(
+                balance::EXPLOIT_BASE
+                    + confidence * balance::EXPLOIT_W_CONF
+                    + skill * balance::EXPLOIT_W_SKILL
+                    - diff_norm * balance::EXPLOIT_W_DIFF
+                    - state.defense_penalty, // host reactivo endurecido (0 si pasivo)
+            );
+
+            let reliable = matches!(vuln.reliability, ExploitReliability::Reliable);
+            if reliable {
+                state.log(format!(
+                    "[exploit] Lanzando exploit contra #{public_id} (vector fiable confirmado)..."
+                ));
+            } else {
+                state.log(format!(
+                    "[exploit] Lanzando exploit contra #{public_id} (prob. éxito ~{}%)...",
+                    (p * 100.0).round() as u32
+                ));
+            }
+
+            if reliable || roll(p) {
+                if let Some(f) = state.find_mut(public_id) {
+                    f.status = FindingStatus::Exploited;
+                }
+                state.log(format!(
+                    "[exploit] Hallazgo #{public_id}: ÉXITO. Shell de USUARIO obtenida."
+                ));
+                state.gain_foothold();
+                state.log(String::from(
+                    "Tienes un punto de apoyo. Explora el sistema (ls, cat) y escala con 'privesc'.",
+                ));
+            } else {
+                state.detection.add_noise(balance::EXPLOIT_FAIL_NOISE);
+                if let Some(f) = state.find_mut(public_id) {
+                    f.status = FindingStatus::Failed;
+                }
+                state.log(format!(
+                    "[exploit] Hallazgo #{public_id}: el exploit FALLÓ. El servicio registra el intento (+18 ruido)."
+                ));
+                state.check_detection();
+            }
+        }
+    }
+}
+
+/// `login`: foothold DETERMINISTA usando una credencial reutilizada de un nivel
+/// anterior. Si el host la acepta y la tienes, entras sin pasar por `exploit`.
+/// Garantizado, pero no gratis: una sesión autenticada deja algo de rastro.
+pub fn login(state: &mut GameState) {
+    if state.has_foothold() {
+        state.log(String::from("[login] Ya tienes una sesión en este host."));
+        return;
+    }
+    // Tras un bastión, primero hay que pivotar.
+    if matches!(state.entry, EntryVector::Pivot { .. }) && !state.pivoted {
+        state.log(String::from(
+            "[login] Host inalcanzable: pivota con 'connect' antes de autenticarte.",
+        ));
+        return;
+    }
+
+    let accepted = match &state.target.accepts_token {
+        Some(tok) if state.foothold_tokens.contains(tok) => true,
+        Some(_) => {
+            state.log(String::from(
+                "[login] No tienes una credencial válida para este host. Tendrás que explotarlo.",
+            ));
+            return;
+        }
+        None => {
+            state.log(String::from(
+                "[login] Este host no acepta credenciales reutilizadas. Usa 'exploit'.",
+            ));
+            return;
+        }
+    };
+
+    if accepted {
+        state.advance_clock(balance::LOGIN_TIME);
+        state.detection.add_noise(balance::LOGIN_NOISE); // una sesión autenticada queda registrada
+        state.log(String::from(
+            "[login] Credencial reutilizada aceptada. Sesión autenticada: shell de USUARIO.",
+        ));
+        state.gain_foothold();
+        state.log(String::from(
+            "Tienes un punto de apoyo sin disparar exploits. Explora (ls, cat) y escala con 'privesc'.",
+        ));
+        state.check_detection();
+    }
+}
+
+// ============================ FASE POST =============================
+
+/// `privesc`: escalada de privilegios local. Éxito => acceso root (desbloquea
+/// los ficheros protegidos). Si la misión no define objetivo, completa el nivel.
+pub fn privesc(state: &mut GameState) {
+    if !state.has_foothold() {
+        state.log(String::from(
+            "Necesitas una shell primero: explota una vulnerabilidad real con 'exploit'.",
+        ));
+        return;
+    }
+    if state.is_root {
+        state.log(String::from(
+            "[privesc] Ya tienes acceso root en este nodo.",
+        ));
+        return;
+    }
+
+    state.advance_clock(balance::PRIVESC_TIME);
+    state.detection.add_noise(balance::PRIVESC_NOISE); // local, poco ruido de red
+
+    // --- Ruta SEGURA (determinista) ---
+    // Si en la fase POST se recogió la llave/credencial local del nivel
+    // (loot con `privesc_key`), la escalada tiene éxito garantizado, sin RNG.
+    if state.privesc_unlocked {
+        state.is_root = true;
+        state.unlock_achievement(AchievementId::FirstRoot);
+        state.log(String::from(
+            "[privesc] Credencial local válida. Acceso ROOT conseguido.",
+        ));
+        post_root_objective(state);
+        return;
+    }
+
+    // --- Ruta RÁPIDA (probabilística, como siempre) ---
+    let skill = state.effective_skill();
+    let diff_norm = state.root_difficulty as f32 / 10.0;
+    let p = clamp01(
+        balance::PRIVESC_BASE + skill * balance::PRIVESC_W_SKILL
+            - diff_norm * balance::PRIVESC_W_DIFF
+            - state.defense_penalty, // host reactivo endurecido (0 si pasivo)
+    );
+
+    state.log(format!(
+        "[privesc] Buscando vector de escalada local (prob. éxito ~{}%)...",
+        (p * 100.0).round() as u32
+    ));
+
+    if roll(p) {
+        state.is_root = true;
+        state.unlock_achievement(AchievementId::FirstRoot);
+        state.log(String::from(
+            "[privesc] Vector encontrado. Acceso ROOT conseguido.",
+        ));
+        post_root_objective(state);
+    } else {
+        state.detection.add_noise(balance::PRIVESC_FAIL_NOISE);
+        state.log(String::from(
+            "[privesc] Escalada fallida. Un proceso de auditoría registra la actividad (+8 ruido).",
+        ));
+        state.check_detection();
+    }
+}
+
+/// Tras conseguir root: si hay objetivo, recuérdalo; si no, completa el nivel
+/// (solo en operaciones de un host) o invita a seguir pivotando (multi-host).
+fn post_root_objective(state: &mut GameState) {
+    match state.objective {
+        Some(_) => state.log(String::from(
+            "Ya tienes los privilegios. Localiza y exfiltra el objetivo con 'cat'.",
+        )),
+        None => {
+            if state.is_single_host() {
+                state.complete_level();
+            } else {
+                state.log(String::from(
+                    "Root en este host. Mapea la red ('netmap') y pivota ('pivot <host>') o busca el objetivo.",
+                ));
+            }
+        }
+    }
+}
+
+/// `netmap`: desde un host comprometido, descubre los hosts vecinos de la red
+/// interna (los marca como alcanzables para `pivot`).
+pub fn netmap(state: &mut GameState) {
+    if state.is_single_host() {
+        state.log(String::from(
+            "[netmap] Esta operación no tiene red interna.",
+        ));
+        return;
+    }
+    if !state.has_foothold() {
+        state.log(String::from(
+            "[netmap] Necesitas una shell en este host para sondear la red interna.",
+        ));
+        return;
+    }
+    state.advance_clock(balance::NETMAP_TIME);
+    state.detection.add_noise(balance::NETMAP_NOISE);
+    let revealed = state.reveal_neighbors();
+    if revealed.is_empty() {
+        state.log(String::from(
+            "[netmap] Sin hosts nuevos: desde aquí no se ve nada más, o ya estaban mapeados.",
+        ));
+    } else {
+        state.log(String::from("[netmap] Hosts internos detectados:"));
+        for name in revealed {
+            state.log(format!("  - {name}   (alcanzable: 'pivot {name}')"));
+        }
+    }
+    state.check_detection();
+}
+
+/// `pivot <host>`: cambia el contexto de operación a otro host alcanzable de la
+/// red interna (conservando el estado de cada host).
+pub fn pivot(state: &mut GameState, host: Option<String>) {
+    if state.is_single_host() {
+        state.log(String::from("[pivot] Esta operación no tiene red interna."));
+        return;
+    }
+    let name = match host {
+        Some(h) => h,
+        None => {
+            state.log(String::from(
+                "uso: pivot <host>  (mira 'netmap' para ver la red)",
+            ));
+            return;
+        }
+    };
+    let idx = match state.host_index(&name) {
+        Some(i) => i,
+        None => {
+            state.log(format!("[pivot] Host desconocido: '{name}'. Usa 'netmap'."));
+            return;
+        }
+    };
+    if idx == state.active {
+        state.log(format!("[pivot] Ya estás operando contra '{name}'."));
+        return;
+    }
+    if !state.hosts[idx].reachable {
+        state.log(format!(
+            "[pivot] '{name}' no es alcanzable todavía. Comprométe un host vecino y usa 'netmap'."
+        ));
+        return;
+    }
+    state.advance_clock(balance::PIVOT_TIME);
+    state.pivot_to(idx);
+    let host = state.target.hostname.clone();
+    state.log(format!(
+        "[pivot] Contexto cambiado. Operando ahora contra {host}."
+    ));
+    if !state.has_foothold() {
+        state.log(String::from(
+            "Aún no controlas este host: reconócelo ('nmap'/'sniff') y entra ('exploit'/'login').",
+        ));
+    }
+}
+
+/// `cleanup`: encubrimiento activo. Reenruta la conexión y purga el rastro para
+/// bajar la traza. Cuesta tiempo (y, en fase activa, algo de dwell) y repetirlo
+/// es cada vez más arriesgado: el defensor se pone alerta.
+pub fn cleanup(state: &mut GameState) {
+    if state.detection.detection <= 0.0 {
+        state.log(String::from("[cleanup] No hay rastro que purgar."));
+        return;
+    }
+
+    state.advance_clock(balance::CLEANUP_TIME);
+    state.log(String::from(
+        "[cleanup] Reenrutando la conexión y purgando tu rastro...",
+    ));
+
+    // La probabilidad de éxito baja con cada encubrimiento del nivel.
+    let p = (balance::CLEANUP_BASE_P - balance::CLEANUP_P_DECAY * state.cleanups_done as f32)
+        .max(balance::CLEANUP_MIN_P);
+    state.cleanups_done += 1;
+
+    if roll(p) {
+        state.detection.reduce(balance::CLEANUP_REDUCTION);
+        state.log(format!(
+            "[cleanup] Rastro reducido (-{:.0} traza).",
+            balance::CLEANUP_REDUCTION
+        ));
+    } else {
+        state.detection.add_noise(balance::CLEANUP_BACKFIRE);
+        state.log(format!(
+            "[cleanup] El encubrimiento deja una huella (+{:.0} traza). Repetirlo cansa la suerte.",
+            balance::CLEANUP_BACKFIRE
+        ));
+    }
+    state.check_detection();
+}
+
+/// `loot`: muestra el inventario de botín recogido en la campaña.
+pub fn loot(state: &mut GameState) {
+    if !state.has_foothold() {
+        state.log(String::from(
+            "No hay nada que saquear todavía: necesitas una shell ('exploit').",
+        ));
+        return;
+    }
+    if state.creds.is_empty() && state.looted_paths.is_empty() {
+        state.log(String::from(
+            "[loot] Inventario vacío. Explora el sistema con 'ls' y lee ficheros con 'cat'.",
+        ));
+        return;
+    }
+
+    state.log(String::from("--- BOTÍN RECOGIDO ---"));
+    state.log(format!(
+        "ficheros saqueados en este nodo: {}",
+        state.looted_paths.len()
+    ));
+    state.log(format!(
+        "bonus de habilidad acumulado: +{:.2}",
+        state.extra_skill
+    ));
+    let creds = state.creds.clone();
+    if creds.is_empty() {
+        state.log(String::from("credenciales: (ninguna todavía)"));
+    } else {
+        state.log(String::from("credenciales:"));
+        for c in creds {
+            state.log(format!("  - {c}"));
+        }
+    }
+}
+
+// ---------------------- VFS: exploración del sistema ----------------------
+
+fn require_shell(state: &mut GameState) -> bool {
+    if state.has_foothold() {
+        true
+    } else {
+        state.log(String::from(
+            "Necesitas una shell para explorar el sistema de archivos (consigue foothold con 'exploit').",
+        ));
+        false
+    }
+}
+
+/// `ls [ruta]`: lista el contenido de un directorio.
+pub fn fs_ls(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = path.unwrap_or_else(|| String::from("."));
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    match filesystem::list_entries(&state.target.filesystem, &comps) {
+        filesystem::ListOutcome::Dir(entries) => {
+            if entries.is_empty() {
+                state.log(format!("{} (vacío)", filesystem::path_string(&comps)));
+            } else {
+                for e in entries {
+                    state.log(format!("  {e}"));
+                }
+            }
+        }
+        filesystem::ListOutcome::File(name) => state.log(name),
+        filesystem::ListOutcome::NotFound => state.log(format!("ls: no existe la ruta '{arg}'")),
+    }
+}
+
+/// `cd [ruta]`: cambia el directorio de trabajo (sin argumento, va a "/").
+pub fn fs_cd(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = path.unwrap_or_else(|| String::from("/"));
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    match filesystem::is_dir(&state.target.filesystem, &comps) {
+        filesystem::DirCheck::Ok => state.cwd = comps,
+        filesystem::DirCheck::NotADir => state.log(format!("cd: '{arg}' no es un directorio")),
+        filesystem::DirCheck::NotFound => state.log(format!("cd: no existe la ruta '{arg}'")),
+    }
+}
+
+/// `pwd`: muestra el directorio de trabajo actual.
+pub fn fs_pwd(state: &mut GameState) {
+    if !require_shell(state) {
+        return;
+    }
+    let p = state.cwd_display();
+    state.log(p);
+}
+
+/// `find [texto]`: busca ficheros/directorios por nombre en todo el árbol.
+pub fn fs_find(state: &mut GameState, needle: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let results = filesystem::search(&state.target.filesystem, needle.as_deref());
+    if results.is_empty() {
+        state.log(String::from("find: sin coincidencias"));
+        return;
+    }
+    for r in results.into_iter().take(60) {
+        state.log(format!("  {r}"));
+    }
+}
+
+/// `cat <ruta>`: lee un fichero. Aplica botín y comprueba el objetivo.
+pub fn fs_cat(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = match path {
+        Some(p) => p,
+        None => {
+            state.log(String::from("uso: cat <ruta>"));
+            return;
+        }
+    };
+
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+
+    match filesystem::read_file(&state.target.filesystem, &comps) {
+        filesystem::ReadOutcome::NotFound => state.log(format!("cat: no existe '{arg}'")),
+        filesystem::ReadOutcome::IsDir => state.log(format!("cat: '{arg}' es un directorio")),
+        filesystem::ReadOutcome::File {
+            content,
+            root,
+            loot,
+            encoding,
+            is_binary,
+        } => {
+            if root && !state.is_root {
+                state.log(format!(
+                    "cat: permiso denegado en {path_disp} (requiere root; usa 'privesc')"
+                ));
+                return;
+            }
+
+            state.advance_clock(1);
+
+            // Binario: 'cat' no sirve. Hay que reversarlo.
+            if is_binary {
+                state.log(format!("--- {path_disp} ---"));
+                state.log(String::from(
+                    "cat: es un binario ejecutable (datos no imprimibles). Usa 'strings' y 'disasm'.",
+                ));
+                return;
+            }
+
+            state.log(format!("--- {path_disp} ---"));
+            // Codificado: 'cat' muestra el blob; el claro y el botín se revelan al
+            // decodificar con 'base64'/'xor'.
+            if let Some(enc) = &encoding {
+                for line in filesystem::encode_display(&content, enc) {
+                    state.log(line);
+                }
+                let hint = match enc {
+                    filesystem::Encoding::Base64 => format!("base64 {arg}"),
+                    filesystem::Encoding::Xor(_) => format!("xor {arg} <clave>"),
+                };
+                state.log(format!(
+                    "(contenido codificado — decodifícalo con '{hint}')"
+                ));
+                return;
+            }
+
+            deliver_file(state, &comps, &path_disp, &content, &loot);
+        }
+    }
+}
+
+/// Vuelca el contenido en claro de un fichero, aplica su botín (la primera vez)
+/// y comprueba si es el objetivo del nivel. Lo usan `cat` (fichero normal) y los
+/// decodificadores (`base64`/`xor`), una vez revelado el claro.
+fn deliver_file(
+    state: &mut GameState,
+    comps: &[String],
+    path_disp: &str,
+    content: &[String],
+    loot: &Option<filesystem::Loot>,
+) {
+    if content.is_empty() {
+        state.log(String::from("(fichero vacío)"));
+    } else {
+        for line in content {
+            state.log(line.clone());
+        }
+    }
+
+    // Botín (solo la primera vez).
+    if let Some(l) = loot {
+        if state.apply_loot(path_disp, l) {
+            state.log(format!("[loot] Botín recogido en {path_disp}:"));
+            if l.skill > 0.0 {
+                state.log(format!("  +{:.2} skill (persiste en la campaña)", l.skill));
+            }
+            if let Some(c) = &l.credential {
+                state.log(format!("  credencial: {c}"));
+            }
+            if let Some(n) = &l.note {
+                state.log(format!("  nota: {n}"));
+            }
+            if l.foothold_token.is_some() {
+                state.log(String::from(
+                    "  credencial reutilizable: podría abrir la puerta de otro host ('login').",
+                ));
+            }
+            if l.hash.is_some() {
+                state.log(String::from(
+                    "  hash saqueado: rómpelo offline con 'john' (sin ruido de red).",
+                ));
+            }
+            if l.wordlist {
+                state.log(String::from(
+                    "  wordlist obtenido: ahora puedes romper hashes que lo requieran.",
+                ));
+            }
+        }
+    }
+
+    state.unlock_campaign_read_file(path_disp);
+
+    // ¿Es el objetivo del nivel? Entonces se exfiltra y se completa.
+    if state.is_objective(comps) {
+        state.log(format!(
+            "[exfil] Datos del objetivo extraídos de {path_disp}."
+        ));
+        state.complete_level();
+    }
+}
+
+// ===================== TRABAJO OFFLINE (avanzado) =====================
+//
+// Cracking de hashes, reversing y decodificación: trabajo LOCAL que gasta reloj
+// pero no ruido de red. La enumeración local (POST) sí deja algo de rastro.
+
+/// Aplica una recompensa de `john`/`solve` y la describe en el log.
+fn report_reward(state: &mut GameState, reward: &Reward) {
+    state.apply_reward(reward);
+    match reward {
+        Reward::Skill(s) => state.log(format!("  +{s:.2} skill (persiste en la campaña).")),
+        Reward::Credential(c) => state.log(format!("  credencial: {c}.")),
+        Reward::Token(_) => state.log(String::from(
+            "  credencial reutilizable: puede abrir otro host ('login') o desbloquear un servicio ('requires').",
+        )),
+        Reward::PrivescKey => state.log(String::from(
+            "  vía de escalada desbloqueada: 'privesc' será determinista en este host.",
+        )),
+    }
+}
+
+/// `john <ruta>` (alias `hashcat`): cracking OFFLINE de un hash saqueado. Hay que
+/// haberlo exfiltrado antes (`cat`). Gasta reloj, no ruido de red.
+pub fn john(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = match path {
+        Some(p) => p,
+        None => {
+            state.log(String::from(
+                "uso: john <ruta-del-hash>  (exfiltra antes el fichero con 'cat')",
+            ));
+            return;
+        }
+    };
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+
+    let hash = match filesystem::file_hash(&state.target.filesystem, &comps) {
+        Some(h) => h,
+        None => {
+            state.log(format!("[john] '{arg}' no contiene un hash crackeable."));
+            return;
+        }
+    };
+    if !state.looted_paths.iter().any(|p| p == &path_disp) {
+        state.log(format!(
+            "[john] Primero exfiltra el hash leyendo el fichero: 'cat {arg}'."
+        ));
+        return;
+    }
+    if state.cracked_paths.iter().any(|p| p == &path_disp) {
+        state.log(format!("[john] El hash de {path_disp} ya está roto."));
+        return;
+    }
+
+    state.advance_clock(balance::JOHN_TIME); // offline: sin ruido de red
+
+    if hash.needs_wordlist && !state.has_wordlist {
+        state.log(format!(
+            "[john] {path_disp} ({}) resiste el ataque: necesitas un wordlist (tipo rockyou). Búscalo en la red.",
+            hash.algo
+        ));
+        return;
+    }
+
+    let skill = state.effective_skill();
+    let strength = (hash.strength.min(10) as f32) / 10.0;
+    let wl = if state.has_wordlist {
+        balance::JOHN_WORDLIST_BONUS
+    } else {
+        0.0
+    };
+    let p = clamp01(
+        balance::JOHN_BASE + skill * balance::JOHN_W_SKILL - strength * balance::JOHN_W_STRENGTH
+            + wl,
+    );
+    state.log(format!(
+        "[john] Atacando hash {path_disp} ({}) offline... prob. éxito ~{}%",
+        hash.algo,
+        (p * 100.0).round() as u32
+    ));
+
+    if roll(p) {
+        state.cracked_paths.push(path_disp.clone());
+        state.log(format!("[john] HASH ROTO: {path_disp}."));
+        report_reward(state, &hash.yields);
+    } else {
+        state.log(String::from(
+            "[john] Sin suerte esta pasada. Reintenta (sube skill, o consigue un wordlist).",
+        ));
+    }
+}
+
+/// `strings <ruta>`: vuelca las cadenas imprimibles de un binario (primer paso
+/// del reversing). Algunas son señuelo; alguna esconde una pista.
+pub fn strings(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = match path {
+        Some(p) => p,
+        None => {
+            state.log(String::from("uso: strings <ruta-del-binario>"));
+            return;
+        }
+    };
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+    match filesystem::file_binary(&state.target.filesystem, &comps) {
+        Some(bin) => {
+            state.advance_clock(balance::REV_TIME);
+            state.log(format!("--- strings {path_disp} ---"));
+            for s in &bin.strings {
+                state.log(s.clone());
+            }
+            if let Some(h) = &bin.hint {
+                state.log(format!("(pista: {h})"));
+            }
+            state.log(String::from(
+                "Desensámblalo con 'disasm' y entrega el secreto con 'solve <ruta> <secreto>'.",
+            ));
+        }
+        None => state.log(format!("[strings] '{arg}' no es un binario.")),
+    }
+}
+
+/// `disasm <ruta>` (alias `objdump`/`r2`): muestra el pseudo-desensamblado de un
+/// binario, donde se esconde la comprobación/secreto a extraer.
+pub fn disasm(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = match path {
+        Some(p) => p,
+        None => {
+            state.log(String::from("uso: disasm <ruta-del-binario>"));
+            return;
+        }
+    };
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+    match filesystem::file_binary(&state.target.filesystem, &comps) {
+        Some(bin) => {
+            state.advance_clock(balance::REV_TIME);
+            state.log(format!("--- disasm {path_disp} ---"));
+            for l in &bin.disasm {
+                state.log(l.clone());
+            }
+            state.log(String::from(
+                "Extrae el secreto y entrégalo con 'solve <ruta> <secreto>'.",
+            ));
+        }
+        None => state.log(format!("[disasm] '{arg}' no es un binario.")),
+    }
+}
+
+/// `solve <ruta> <secreto>`: entrega el secreto extraído por reversing. Si acierta,
+/// otorga la recompensa del binario.
+pub fn solve(state: &mut GameState, path: Option<String>, secret: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let (arg, guess) = match (path, secret) {
+        (Some(p), Some(s)) => (p, s),
+        _ => {
+            state.log(String::from("uso: solve <ruta-del-binario> <secreto>"));
+            return;
+        }
+    };
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+    let bin = match filesystem::file_binary(&state.target.filesystem, &comps) {
+        Some(b) => b,
+        None => {
+            state.log(format!("[solve] '{arg}' no es un binario."));
+            return;
+        }
+    };
+    if state.solved_paths.iter().any(|p| p == &path_disp) {
+        state.log(format!("[solve] {path_disp} ya está resuelto."));
+        return;
+    }
+    state.advance_clock(balance::REV_TIME);
+    if guess.trim().eq_ignore_ascii_case(bin.secret.trim()) {
+        state.solved_paths.push(path_disp.clone());
+        state.log(format!("[solve] Secreto correcto. {path_disp} descifrado."));
+        report_reward(state, &bin.yields);
+    } else {
+        state.log(String::from(
+            "[solve] Secreto incorrecto. Revisa 'strings'/'disasm' otra vez.",
+        ));
+    }
+}
+
+/// `base64 <ruta>` / `xor <ruta> <clave>`: decodifica un fichero codificado y
+/// revela su claro (y su botín). Trabajo local: gasta poco reloj, sin ruido.
+pub fn decode_cmd(state: &mut GameState, tool: &str, path: Option<String>, key: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = match path {
+        Some(p) => p,
+        None => {
+            let usage = if tool == "xor" {
+                "uso: xor <ruta> <clave>"
+            } else {
+                "uso: base64 <ruta>"
+            };
+            state.log(String::from(usage));
+            return;
+        }
+    };
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+    match filesystem::decode_file(&state.target.filesystem, &comps, tool, key.as_deref()) {
+        filesystem::DecodeOutcome::Ok(content) => {
+            state.advance_clock(balance::DECODE_TIME);
+            state.log(format!("--- {tool} {path_disp} ---"));
+            // Recupera el botín del fichero para entregarlo junto al claro.
+            let loot = match filesystem::read_file(&state.target.filesystem, &comps) {
+                filesystem::ReadOutcome::File { loot, .. } => loot,
+                _ => None,
+            };
+            deliver_file(state, &comps, &path_disp, &content, &loot);
+        }
+        filesystem::DecodeOutcome::WrongKey => {
+            state.advance_clock(balance::DECODE_TIME);
+            state.log(String::from(
+                "[xor] Clave incorrecta: el resultado sigue siendo ruido.",
+            ));
+        }
+        filesystem::DecodeOutcome::WrongTool => {
+            state.log(format!("[{tool}] '{arg}' no está codificado con {tool}."))
+        }
+        filesystem::DecodeOutcome::NotEncoded => state.log(format!(
+            "[{tool}] '{arg}' no está codificado (léelo con 'cat')."
+        )),
+    }
+}
+
+/// `linpeas`/`sudo -l`/`suid`/`sysinfo`: enumeración local en POST. Revela el
+/// vector de escalada del host (si lo hay) y habilita `privesc` determinista.
+/// `tool` selecciona el chequeo; `linpeas` los cubre todos.
+pub fn local_enum(state: &mut GameState, tool: &str) {
+    if !require_shell(state) {
+        return;
+    }
+    state.advance_clock(balance::LOCALENUM_TIME);
+    state.detection.add_noise(balance::LOCALENUM_NOISE);
+
+    let lp = state.target.local_privesc.clone();
+    let lp = match lp {
+        Some(lp) => lp,
+        None => {
+            state.log(format!(
+                "[{tool}] Sin vías de escalada local evidentes en este host."
+            ));
+            state.check_detection();
+            return;
+        }
+    };
+
+    // ¿Este chequeo cubre el tipo de vector del host?
+    let covers = tool == "linpeas"
+        || matches!(
+            (tool, lp.kind),
+            ("sudo", LocalKind::Sudo) | ("suid", LocalKind::Suid) | ("sysinfo", LocalKind::Kernel)
+        );
+
+    if !covers {
+        state.log(format!(
+            "[{tool}] Este chequeo no revela nada aquí. Prueba otro ('linpeas' los cubre todos)."
+        ));
+        state.check_detection();
+        return;
+    }
+
+    if state.privesc_unlocked {
+        state.log(format!(
+            "[{tool}] El vector de escalada ya estaba identificado."
+        ));
+    } else {
+        state.privesc_unlocked = true;
+        state.log(format!("[{tool}] Vector de escalada local: {}", lp.note));
+        state.log(String::from(
+            "'privesc' ahora tiene éxito garantizado en este host.",
+        ));
+    }
+    state.check_detection();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::campaign::Campaign;
+    use crate::model::filesystem::{Binary, Encoding, FsNode, Loot, LootHash, Reward};
+    use crate::model::mission::{Ending, EntryVector, Mission, NetHost};
+    use crate::model::target::{LocalKind, LocalPrivesc, Service, TargetNode, Vulnerability};
+    use crate::model::theme::Theme;
+    use crate::runtime::state::{GameOutcome, GameState, Phase};
+
+    // ---------------- Fixtures: campaña sintética para los tests ----------------
+    //
+    // Los tests del motor NO dependen de ninguna campaña de disco: construyen su
+    // propia campaña mínima en código. Así el motor se valida sin la campaña de
+    // ejemplo ni ninguna campaña concreta.
+
+    fn loot_key() -> Loot {
+        Loot {
+            skill: 0.0,
+            credential: None,
+            note: None,
+            privesc_key: true,
+            foothold_token: None,
+            hash: None,
+            wordlist: false,
+        }
+    }
+
+    fn loot_token(tok: &str) -> Loot {
+        Loot {
+            skill: 0.05,
+            credential: Some(String::from("cred")),
+            note: None,
+            privesc_key: false,
+            foothold_token: Some(tok.to_string()),
+            hash: None,
+            wordlist: false,
+        }
+    }
+
+    fn file(name: &str, root: bool, loot: Option<Loot>) -> FsNode {
+        FsNode::File {
+            name: name.to_string(),
+            content: vec![String::from("...")],
+            root,
+            loot,
+            binary: None,
+            encoding: None,
+        }
+    }
+
+    fn dir(name: &str, children: Vec<FsNode>) -> FsNode {
+        FsNode::Dir {
+            name: name.to_string(),
+            children,
+        }
+    }
+
+    /// Host del nivel 0: entrada fría por 443, llave en /home/op/.ssh/id_rsa y
+    /// objetivo protegido en /root/secret.dat.
+    fn host_m0() -> TargetNode {
+        TargetNode {
+            hostname: String::from("h0.lab"),
+            ip: String::from("10.0.0.10"),
+            os: String::from("Linux"),
+            services: vec![
+                Service {
+                    port: 443,
+                    name: String::from("https"),
+                    version: String::from("v"),
+                    requires: None,
+                },
+                Service {
+                    port: 80,
+                    name: String::from("http"),
+                    version: String::from("v"),
+                    requires: None,
+                },
+                Service {
+                    port: 22,
+                    name: String::from("ssh"),
+                    version: String::from("v"),
+                    requires: None,
+                },
+            ],
+            vulnerabilities: vec![
+                Vulnerability {
+                    id: String::from("V443"),
+                    name: String::from("a"),
+                    affected_service: 443,
+                    difficulty: 5,
+                    stealth_cost: 7,
+                    reliability: ExploitReliability::Reliable,
+                },
+                Vulnerability {
+                    id: String::from("V80"),
+                    name: String::from("b"),
+                    affected_service: 80,
+                    difficulty: 7,
+                    stealth_cost: 9,
+                    reliability: ExploitReliability::Unstable,
+                },
+            ],
+            filesystem: vec![
+                dir(
+                    "home",
+                    vec![dir(
+                        "op",
+                        vec![dir(".ssh", vec![file("id_rsa", false, Some(loot_key()))])],
+                    )],
+                ),
+                dir("root", vec![file("secret.dat", true, None)]),
+            ],
+            accepts_token: None,
+            local_privesc: None,
+        }
+    }
+
+    fn host_edge() -> NetHost {
+        NetHost {
+            target: TargetNode {
+                hostname: String::from("edge.lab"),
+                ip: String::from("10.0.1.1"),
+                os: String::from("Linux"),
+                services: vec![Service {
+                    port: 80,
+                    name: String::from("http"),
+                    version: String::from("v"),
+                    requires: None,
+                }],
+                vulnerabilities: vec![Vulnerability {
+                    id: String::from("VE"),
+                    name: String::from("a"),
+                    affected_service: 80,
+                    difficulty: 4,
+                    stealth_cost: 6,
+                    reliability: ExploitReliability::Reliable,
+                }],
+                filesystem: vec![
+                    dir(
+                        "home",
+                        vec![dir(
+                            "op",
+                            vec![dir(".ssh", vec![file("id_rsa", false, Some(loot_key()))])],
+                        )],
+                    ),
+                    dir(
+                        "opt",
+                        vec![file("app.cfg", false, Some(loot_token("tok-relay")))],
+                    ),
+                ],
+                accepts_token: None,
+                local_privesc: None,
+            },
+            links: vec![String::from("relay")],
+            entry: true,
+            objective: None,
+        }
+    }
+
+    fn host_relay() -> NetHost {
+        NetHost {
+            target: TargetNode {
+                hostname: String::from("relay.lab"),
+                ip: String::from("10.0.1.2"),
+                os: String::from("Linux"),
+                services: vec![Service {
+                    port: 22,
+                    name: String::from("ssh"),
+                    version: String::from("v"),
+                    requires: None,
+                }],
+                vulnerabilities: vec![Vulnerability {
+                    id: String::from("VR"),
+                    name: String::from("a"),
+                    affected_service: 22,
+                    difficulty: 6,
+                    stealth_cost: 8,
+                    reliability: ExploitReliability::Reliable,
+                }],
+                filesystem: vec![
+                    dir("var", vec![file(".recovery", false, Some(loot_key()))]),
+                    dir("root", vec![file("blueprints.dat", true, None)]),
+                ],
+                accepts_token: Some(String::from("tok-relay")),
+                local_privesc: None,
+            },
+            links: vec![],
+            entry: false,
+            objective: Some(String::from("/root/blueprints.dat")),
+        }
+    }
+
+    fn mission(
+        id: &str,
+        entry: EntryVector,
+        objective: Option<String>,
+        time_limit: Option<u32>,
+        target: TargetNode,
+        network: Vec<NetHost>,
+        endings: Vec<Ending>,
+    ) -> Mission {
+        Mission {
+            id: id.to_string(),
+            name: id.to_uppercase(),
+            briefing: vec![],
+            detection_limit: 110.0,
+            time_limit,
+            reactive: false,
+            skill: 0.5,
+            root_difficulty: 3,
+            objective,
+            debrief: vec![],
+            entry,
+            endings,
+            target,
+            network,
+        }
+    }
+
+    fn demo_campaign() -> Campaign {
+        Campaign {
+            name: String::from("DEMO"),
+            language: Language::Es,
+            intro: vec![],
+            theme: Theme::default(),
+            easter_eggs: vec![],
+            fortunes: vec![],
+            signals: vec![],
+            achievements: vec![],
+            missions: vec![
+                mission(
+                    "m0",
+                    EntryVector::Cold { ports: vec![443] },
+                    Some(String::from("/root/secret.dat")),
+                    Some(280),
+                    host_m0(),
+                    vec![],
+                    vec![],
+                ),
+                mission(
+                    "m1",
+                    EntryVector::Active,
+                    None,
+                    None,
+                    TargetNode::empty(),
+                    vec![host_edge(), host_relay()],
+                    vec![],
+                ),
+                mission(
+                    "m2",
+                    EntryVector::Active,
+                    None,
+                    None,
+                    host_m0(),
+                    vec![],
+                    vec![
+                        Ending {
+                            title: String::from("Opción A"),
+                            lines: vec![String::from("epílogo")],
+                        },
+                        Ending {
+                            title: String::from("Opción B"),
+                            lines: vec![],
+                        },
+                    ],
+                ),
+            ],
+        }
+    }
+
+    fn demo_state() -> GameState {
+        GameState::new(demo_campaign())
+    }
+
+    fn multi_host_index(g: &GameState) -> usize {
+        g.campaign
+            .missions
+            .iter()
+            .position(|m| !m.network.is_empty())
+            .expect("debe existir una operación multi-host")
+    }
+
+    /// El final con elección cierra la campaña en victoria con epílogo.
+    #[test]
+    fn final_con_eleccion_cierra_campana() {
+        let mut g = demo_state();
+        g.level_index = g.level_count() - 1; // última operación (define endings)
+        g.awaiting_choice = true;
+        g.resolve_ending(0);
+        assert!(!g.awaiting_choice);
+        assert_eq!(g.outcome, Some(GameOutcome::Victory));
+        assert!(g.epilogue.is_some());
+    }
+
+    /// Una opción fuera de rango no cierra la campaña.
+    #[test]
+    fn eleccion_invalida_no_cierra() {
+        let mut g = demo_state();
+        g.level_index = g.level_count() - 1;
+        g.awaiting_choice = true;
+        g.resolve_ending(99);
+        assert!(g.awaiting_choice);
+        assert_eq!(g.outcome, None);
+    }
+
+    /// Barajar las vulnerabilidades conserva el multiconjunto de dificultades.
+    #[test]
+    fn shuffle_conserva_balance() {
+        let c = demo_campaign();
+        let mut orig: Vec<u8> = c.missions[0]
+            .target
+            .vulnerabilities
+            .iter()
+            .map(|v| v.difficulty)
+            .collect();
+        let g = GameState::new(c);
+        let mut got: Vec<u8> = g
+            .target
+            .vulnerabilities
+            .iter()
+            .map(|v| v.difficulty)
+            .collect();
+        orig.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(orig, got);
+    }
+
+    /// Entrada `Cold`: el nivel 0 arranca en ENUM con el puerto que el cliente
+    /// señaló ya descubierto, sin necesidad de `nmap`.
+    #[test]
+    fn entrada_fria_arranca_en_enum() {
+        let g = demo_state(); // m0 = Cold(ports: [443])
+        assert!(matches!(g.entry, EntryVector::Cold { .. }));
+        assert_eq!(g.phase, Phase::Enum);
+        assert!(g.discovered_ports.contains(&443));
+    }
+
+    /// Entrada `Pivot`: sin `connect` no se puede escanear; tras pivotar, sí.
+    #[test]
+    fn entrada_pivote_exige_connect_antes_de_escanear() {
+        let mut g = demo_state();
+        g.entry = EntryVector::Pivot {
+            gateway: String::from("bastion"),
+        };
+        g.pivoted = false;
+        g.phase = Phase::Recon;
+        g.discovered_ports.clear();
+
+        recon(&mut g);
+        assert!(g.discovered_ports.is_empty(), "sin pivotar no se escanea");
+
+        connect(&mut g, None);
+        assert!(g.pivoted, "connect debe establecer el túnel");
+
+        recon(&mut g);
+        assert!(
+            !g.discovered_ports.is_empty(),
+            "tras pivotar, nmap descubre"
+        );
+    }
+
+    /// El dwell sube la traza durante las fases activas, pero no en POST.
+    #[test]
+    fn dwell_solo_en_fases_activas() {
+        let mut g = demo_state();
+        assert!(!g.has_foothold());
+        let before = g.detection.detection;
+        g.advance_clock(10);
+        assert!(g.detection.detection > before, "dwell sube en fase activa");
+
+        g.gain_foothold(); // -> POST
+        let post = g.detection.detection;
+        g.advance_clock(10);
+        assert_eq!(
+            g.detection.detection, post,
+            "en POST la exploración es gratis"
+        );
+    }
+
+    /// `login` da foothold determinista solo si el host acepta un token que tienes.
+    #[test]
+    fn login_determinista_con_credencial_reutilizada() {
+        let mut g = demo_state();
+        // m0 no acepta tokens: no hay login.
+        assert!(g.target.accepts_token.is_none());
+        login(&mut g);
+        assert!(!g.has_foothold());
+
+        // El host acepta un token que NO tenemos: sigue sin foothold.
+        g.target.accepts_token = Some(String::from("k"));
+        login(&mut g);
+        assert!(!g.has_foothold());
+
+        // Con el token recogido: foothold garantizado.
+        g.foothold_tokens.push(String::from("k"));
+        login(&mut g);
+        assert!(g.has_foothold());
+    }
+
+    /// Gating de credenciales: un servicio con `requires` rechaza la enumeración
+    /// hasta tener el token; conseguido, deja enumerar (gasta reloj).
+    #[test]
+    fn enum_gated_exige_credencial_previa() {
+        let mut g = demo_state(); // m0: Cold(443) -> fase Enum, puerto 443 descubierto
+                                  // Cierra el servicio 443 tras una credencial que aún no tenemos.
+        if let Some(s) = g.target.services.iter_mut().find(|s| s.port == 443) {
+            s.requires = Some(String::from("tok-vpn"));
+        }
+        let clock0 = g.clock;
+        enumerate(&mut g, "probe", Some(443));
+        assert_eq!(g.clock, clock0, "el rechazo no gasta reloj");
+        assert!(g.intel.is_empty(), "sin credencial no hay hallazgos");
+
+        // Con la credencial recogida, la enumeración procede (consume reloj).
+        g.foothold_tokens.push(String::from("tok-vpn"));
+        enumerate(&mut g, "probe", Some(443));
+        assert!(g.clock > clock0, "con credencial, enumerar gasta reloj");
+    }
+
+    // ---------------- Mecánicas avanzadas (POST) ----------------
+
+    fn hash_file(name: &str, strength: u8, needs_wl: bool, yields: Reward) -> FsNode {
+        FsNode::File {
+            name: name.to_string(),
+            content: vec![String::from("$6$...redacted...")],
+            root: false,
+            loot: Some(Loot {
+                skill: 0.0,
+                credential: None,
+                note: None,
+                privesc_key: false,
+                foothold_token: None,
+                hash: Some(LootHash {
+                    algo: String::from("sha512crypt"),
+                    strength,
+                    needs_wordlist: needs_wl,
+                    yields,
+                }),
+                wordlist: false,
+            }),
+            binary: None,
+            encoding: None,
+        }
+    }
+
+    fn bin_file(name: &str, secret: &str, yields: Reward) -> FsNode {
+        FsNode::File {
+            name: name.to_string(),
+            content: vec![],
+            root: false,
+            loot: None,
+            binary: Some(Binary {
+                strings: vec![String::from("GLIBC_2.27"), String::from("cmp_key")],
+                disasm: vec![
+                    String::from("xor eax, 0x5a"),
+                    String::from("cmp eax, 0x1f3b"),
+                ],
+                secret: secret.to_string(),
+                yields,
+                hint: Some(String::from("la clave está ofuscada")),
+            }),
+            encoding: None,
+        }
+    }
+
+    fn enc_file(name: &str, content: Vec<String>, enc: Encoding, loot: Option<Loot>) -> FsNode {
+        FsNode::File {
+            name: name.to_string(),
+            content,
+            root: false,
+            loot,
+            binary: None,
+            encoding: Some(enc),
+        }
+    }
+
+    /// Forzamos un foothold con shell y un VFS de prueba inyectado en el host activo.
+    fn post_state_with(fs: Vec<FsNode>) -> GameState {
+        let mut g = demo_state();
+        g.gain_foothold();
+        g.target.filesystem = fs;
+        g
+    }
+
+    /// `john` rompe un hash débil (con wordlist) y otorga su recompensa; exige
+    /// haber exfiltrado el fichero antes.
+    #[test]
+    fn john_rompe_hash_y_otorga_token() {
+        let mut g = post_state_with(vec![hash_file(
+            "shadow",
+            0,
+            false,
+            Reward::Token(String::from("tok-x")),
+        )]);
+        g.base_skill = 0.95; // p alta y determinista con wordlist
+        g.has_wordlist = true;
+
+        // Sin exfiltrar (cat) primero, john no procede.
+        john(&mut g, Some(String::from("/shadow")));
+        assert!(!g.foothold_tokens.contains(&String::from("tok-x")));
+
+        fs_cat(&mut g, Some(String::from("/shadow"))); // exfiltra el hash
+        john(&mut g, Some(String::from("/shadow")));
+        assert!(
+            g.foothold_tokens.contains(&String::from("tok-x")),
+            "el hash roto otorga el token"
+        );
+    }
+
+    /// Un hash que exige wordlist no se rompe sin él (determinista).
+    #[test]
+    fn john_sin_wordlist_no_rompe_hash_fuerte() {
+        let mut g = post_state_with(vec![hash_file("shadow", 9, true, Reward::PrivescKey)]);
+        fs_cat(&mut g, Some(String::from("/shadow")));
+        assert!(!g.has_wordlist);
+        john(&mut g, Some(String::from("/shadow")));
+        assert!(!g.privesc_unlocked, "sin wordlist el hash fuerte resiste");
+        assert!(!g.cracked_paths.contains(&String::from("/shadow")));
+    }
+
+    /// `solve` con el secreto correcto otorga la recompensa; incorrecto no.
+    #[test]
+    fn solve_secreto_correcto_otorga_recompensa() {
+        let mut g = post_state_with(vec![bin_file("authd", "AX29", Reward::PrivescKey)]);
+        solve(
+            &mut g,
+            Some(String::from("/authd")),
+            Some(String::from("nope")),
+        );
+        assert!(!g.privesc_unlocked);
+        // Case-insensitive.
+        solve(
+            &mut g,
+            Some(String::from("/authd")),
+            Some(String::from("ax29")),
+        );
+        assert!(
+            g.privesc_unlocked,
+            "el secreto correcto desbloquea la escalada"
+        );
+        assert!(g.solved_paths.contains(&String::from("/authd")));
+    }
+
+    /// `cat` de un binario no revela contenido ni botín (hay que reversarlo).
+    #[test]
+    fn cat_de_binario_no_revela() {
+        let mut g = post_state_with(vec![bin_file("authd", "X", Reward::Skill(0.1))]);
+        let before = g.extra_skill;
+        fs_cat(&mut g, Some(String::from("/authd")));
+        assert_eq!(
+            g.extra_skill, before,
+            "el binario no suelta botín por 'cat'"
+        );
+    }
+
+    /// `xor` con la clave correcta revela el claro y aplica el botín; con clave
+    /// incorrecta no.
+    #[test]
+    fn xor_decodifica_con_clave_correcta() {
+        let loot = Loot {
+            skill: 0.0,
+            credential: Some(String::from("cred-secreta")),
+            note: None,
+            privesc_key: false,
+            foothold_token: None,
+            hash: None,
+            wordlist: false,
+        };
+        let mut g = post_state_with(vec![enc_file(
+            "c2.cfg",
+            vec![String::from("upstream=ashford")],
+            Encoding::Xor(String::from("k3y")),
+            Some(loot),
+        )]);
+
+        // Clave incorrecta: no aplica botín.
+        decode_cmd(
+            &mut g,
+            "xor",
+            Some(String::from("/c2.cfg")),
+            Some(String::from("mala")),
+        );
+        assert!(!g.creds.contains(&String::from("cred-secreta")));
+
+        decode_cmd(
+            &mut g,
+            "xor",
+            Some(String::from("/c2.cfg")),
+            Some(String::from("k3y")),
+        );
+        assert!(
+            g.creds.contains(&String::from("cred-secreta")),
+            "la clave correcta revela el botín"
+        );
+    }
+
+    /// La enumeración local revela el vector de escalada solo con el chequeo
+    /// adecuado (o `linpeas`), y habilita `privesc` determinista.
+    #[test]
+    fn local_enum_revela_vector_de_escalada() {
+        let mut g = demo_state();
+        g.gain_foothold();
+        g.target.local_privesc = Some(LocalPrivesc {
+            kind: LocalKind::Sudo,
+            note: String::from("sudo vim"),
+        });
+
+        // Chequeo equivocado: no revela.
+        local_enum(&mut g, "suid");
+        assert!(!g.privesc_unlocked);
+
+        // Chequeo afín: revela y habilita la escalada determinista.
+        local_enum(&mut g, "sudo");
+        assert!(g.privesc_unlocked);
+        privesc(&mut g);
+        assert!(g.is_root);
+    }
+
+    /// Un vector marcado como Reliable no depende de la tirada de explotación.
+    #[test]
+    fn exploit_fiable_es_determinista() {
+        let mut g = demo_state();
+        g.reach_phase(Phase::Exploit);
+        g.defense_penalty = 1.0; // haría p=0 en la ruta probabilística.
+        let id = g.push_finding(
+            String::from("vector fiable"),
+            0.0,
+            FindingSource::DeepScan,
+            Some(String::from("V443")),
+        );
+
+        exploit(&mut g, id);
+
+        assert!(g.has_foothold());
+        assert!(matches!(
+            g.find(id).map(|f| f.status),
+            Some(FindingStatus::Exploited)
+        ));
+    }
+
+    /// La confianza por consenso está acotada y crece/decrece con las lecturas.
+    #[test]
+    fn consenso_confianza_acotada_y_monotona() {
+        assert!(consensus_confidence(0, 0) > 0.10 && consensus_confidence(0, 0) < 0.90);
+        assert!(consensus_confidence(3, 0) > consensus_confidence(1, 0));
+        assert!(consensus_confidence(0, 3) < consensus_confidence(0, 1));
+        assert!(consensus_confidence(20, 0) <= 0.90);
+        assert!(consensus_confidence(0, 20) >= 0.10);
+    }
+
+    /// Integración: una operación de un host se cierra por la ruta segura
+    /// (foothold → llave → privesc determinista → exfiltración) y avanza de nivel.
+    #[test]
+    fn integracion_un_host_se_completa() {
+        let mut g = demo_state(); // m0 (entrada Fría)
+        assert_eq!(g.level_index, 0);
+
+        // El exploit del borde es RNG; aquí probamos la espina determinista.
+        g.gain_foothold();
+        fs_cat(&mut g, Some(String::from("/home/op/.ssh/id_rsa")));
+        assert!(g.privesc_unlocked, "la llave habilita la escalada segura");
+        privesc(&mut g);
+        assert!(g.is_root);
+        fs_cat(&mut g, Some(String::from("/root/secret.dat")));
+        assert_eq!(g.level_index, 1, "completar m0 avanza a m1");
+    }
+
+    /// Integración: la traza al límite aborta la operación.
+    #[test]
+    fn integracion_derrota_por_traza() {
+        let mut g = demo_state();
+        g.detection.add_noise(g.detection_limit);
+        g.check_detection();
+        assert_eq!(g.outcome, Some(GameOutcome::Defeat));
+    }
+
+    /// Integración: agotar la ventana de tiempo aborta la operación.
+    #[test]
+    fn integracion_derrota_por_tiempo() {
+        let mut g = demo_state();
+        // m0 define un límite de tiempo.
+        if let Some(limit) = g.time_limit {
+            g.advance_clock(limit); // el reloj alcanza la ventana
+            assert_eq!(g.outcome, Some(GameOutcome::Defeat));
+            assert_eq!(g.time_remaining(), Some(0));
+        }
+    }
+
+    /// La defensa activa escala por etapas con la traza y penaliza el éxito.
+    #[test]
+    fn defensa_activa_escala_y_penaliza() {
+        let mut g = demo_state();
+        g.reactive = true;
+        g.detection_limit = 100.0;
+        g.defense_stage = 0;
+        g.defense_penalty = 0.0;
+
+        // Bajo umbral: ninguna etapa todavía.
+        g.detection.add_noise(10.0);
+        g.check_detection();
+        assert_eq!(g.defense_stage, 0);
+        assert_eq!(g.defense_penalty, 0.0);
+
+        // Cruza el primer umbral (35%): dispara la etapa 1 y penaliza.
+        g.detection.add_noise(30.0);
+        g.check_detection();
+        assert!(g.defense_stage >= 1, "la defensa debe haber reaccionado");
+        assert!(g.defense_penalty > 0.0, "debe penalizar el éxito");
+    }
+
+    /// Un host pasivo (no reactivo) nunca dispara contramedidas.
+    #[test]
+    fn host_pasivo_no_tiene_defensa() {
+        let mut g = demo_state();
+        g.reactive = false;
+        g.detection_limit = 100.0;
+        g.detection.add_noise(90.0);
+        g.check_detection();
+        assert_eq!(g.defense_stage, 0);
+        assert_eq!(g.defense_penalty, 0.0);
+    }
+
+    /// Integración: la operación multi-host se completa pivotando por la red y
+    /// usando `login` (foothold determinista) en cada host interno.
+    #[test]
+    fn integracion_multi_host_se_completa() {
+        let mut g = demo_state();
+        let idx = multi_host_index(&g);
+        g.apply_mission(idx);
+
+        // --- edge (borde): foothold por exploit (simulado) ---
+        g.gain_foothold();
+        fs_cat(&mut g, Some(String::from("/home/op/.ssh/id_rsa"))); // privesc_key
+        fs_cat(&mut g, Some(String::from("/opt/app.cfg"))); // token tok-relay
+        privesc(&mut g);
+        assert!(g.is_root);
+        netmap(&mut g);
+        pivot(&mut g, Some(String::from("relay")));
+
+        // --- relay (núcleo): login + objetivo ---
+        login(&mut g);
+        assert!(g.has_foothold(), "login con tok-relay da foothold");
+        fs_cat(&mut g, Some(String::from("/var/.recovery")));
+        privesc(&mut g);
+        assert!(g.is_root);
+        fs_cat(&mut g, Some(String::from("/root/blueprints.dat")));
+        assert_eq!(
+            g.level_index,
+            idx + 1,
+            "exfiltrar el núcleo avanza de operación"
+        );
+    }
+
+    /// Red interna: descubrir vecinos, pivotar y conservar el estado por host.
+    #[test]
+    fn red_interna_pivota_y_conserva_estado() {
+        let mut g = demo_state();
+        let idx = multi_host_index(&g);
+        g.apply_mission(idx);
+
+        assert!(!g.is_single_host());
+        assert_eq!(g.hosts.len(), 2);
+        assert_eq!(g.active, 0, "se arranca en el host de entrada");
+
+        // Comprometer el host de entrada y descubrir la red interna.
+        g.gain_foothold();
+        let revealed = g.reveal_neighbors();
+        assert!(!revealed.is_empty(), "netmap debe revelar vecinos");
+
+        let nb = g.host_index("relay").expect("vecino conocido");
+        assert!(g.hosts[nb].reachable);
+
+        // Pivotar al vecino: contexto fresco, sin foothold.
+        g.pivot_to(nb);
+        assert_eq!(g.active, nb);
+        assert!(!g.has_foothold());
+
+        // Volver al host de entrada: conserva su foothold (estado por host).
+        g.pivot_to(0);
+        assert!(g.has_foothold(), "el host de entrada conserva su shell");
+    }
+
+    /// `sniff` revela los servicios de uno en uno (interceptación pasiva).
+    #[test]
+    fn sniff_revela_un_servicio_por_uso() {
+        let mut g = demo_state();
+        g.entry = EntryVector::Passive;
+        g.phase = Phase::Recon;
+        g.discovered_ports.clear();
+
+        sniff(&mut g);
+        assert_eq!(g.discovered_ports.len(), 1);
+        sniff(&mut g);
+        assert_eq!(g.discovered_ports.len(), 2);
+    }
+
+    /// Ruta segura: con la llave local recogida, `privesc` escala SIEMPRE,
+    /// aunque la dificultad sea máxima y el skill mínimo (sin depender del RNG).
+    #[test]
+    fn privesc_seguro_es_determinista() {
+        let mut g = demo_state();
+        g.gain_foothold();
+        g.privesc_unlocked = true;
+        g.root_difficulty = 10; // probabilidad rápida ~0 si se usara
+        g.base_skill = 0.0;
+        g.extra_skill = 0.0;
+        for _ in 0..100 {
+            g.is_root = false;
+            privesc(&mut g);
+            assert!(
+                g.is_root,
+                "la ruta segura debe garantizar root en cada intento"
+            );
+        }
+    }
+
+    /// Compatibilidad: sin llave local, la ruta segura está desactivada y la
+    /// escalada sigue el camino probabilístico de siempre.
+    #[test]
+    fn privesc_sin_llave_no_activa_ruta_segura() {
+        let g = demo_state();
+        assert!(
+            !g.privesc_unlocked,
+            "por defecto la escalada no es determinista"
+        );
+    }
+
+    /// Recoger un botín con `privesc_key` habilita la ruta segura vía `apply_loot`.
+    #[test]
+    fn loot_con_llave_habilita_ruta_segura() {
+        let mut g = demo_state();
+        let key = loot_key();
+        assert!(g.apply_loot("/home/x/.ssh/id_rsa", &key));
+        assert!(g.privesc_unlocked, "la llave debe activar la ruta segura");
+
+        // Un botín normal NO activa la ruta segura.
+        let mut g2 = demo_state();
+        let plain = Loot {
+            skill: 0.05,
+            credential: Some(String::from("algo")),
+            note: None,
+            privesc_key: false,
+            foothold_token: None,
+            hash: None,
+            wordlist: false,
+        };
+        assert!(g2.apply_loot("/etc/some.conf", &plain));
+        assert!(!g2.privesc_unlocked);
+    }
+}

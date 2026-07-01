@@ -1,0 +1,21 @@
+# ---- Build ----
+/target/
+**/*.rs.bk
+
+# ---- Estado de runtime (no es código ni contenido del repo) ----
+save.ron
+/save/
+/logs/
+
+# ---- Contenido PRIVADO (no se publica con el motor Open Source) ----
+# La campaña oficial y cualquier campaña privada viven fuera del repo público.
+/campaigns/private/
+/campaigns/official/
+/Landing_page/
+
+# ---- Editor / SO ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

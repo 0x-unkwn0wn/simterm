@@ -1,0 +1,248 @@
+// ============================================================================
+//  CAMPAÑA DE EJEMPLO — "POLÍGONO DE PRÁCTICAS"
+// ----------------------------------------------------------------------------
+//  Campaña ficticia mínima cuyo único fin es DEMOSTRAR el formato de datos que
+//  interpreta el motor (simterm-engine). No es una historia: es un campo de
+//  tiro para aprender la sintaxis. Cópiala como punto de partida para la tuya.
+//
+//  Ejecútala con:
+//      cargo run -p simterm -- --campaign ./examples/sample_campaign
+//
+//  Formato completo documentado en docs/CAMPAIGN_FORMAT.md
+// ============================================================================
+Campaign(
+    name: "Polígono de Prácticas",
+    language: es,
+    intro: [
+        "Bienvenido al POLÍGONO: un entorno de prácticas totalmente simulado.",
+        "Aquí nada es real. Es solo para aprender el formato del motor.",
+        "Completa los ejercicios para ver cómo encaja cada pieza.",
+    ],
+
+    // ---- Tematización: TODO el texto de marca/cosmético se define aquí ----
+    theme: (
+        app_title: "POLÍGONO",
+        boot_header: "P O L Í G O N O",
+        boot_lines: [
+            "Entorno de prácticas inicializado.",
+            "Modo simulación: sin objetivos reales.",
+        ],
+        overlay_title: " POLÍGONO ",
+        alert_title: " ALERTA ",
+        operator_prompt: "alumno@poligono:~$ ",
+        stealth_grades: ["IMPECABLE", "LIMPIO", "VISIBLE", "DESCUIDADO"],
+        defense_messages: [
+            "[SIMULACIÓN] El defensor te ha detectado: a partir de ahora cuesta más.",
+            "[SIMULACIÓN] Contramedidas activas: la traza sube más rápido.",
+            "[SIMULACIÓN] Cerco cerrado: termina ya o suspendes el ejercicio.",
+        ],
+        aborted_lines: [
+            "La traza ha llegado al máximo.",
+            "Ejercicio fallido: te han localizado.",
+            "Vuelve a intentarlo cuando quieras.",
+        ],
+        credits: [
+            "EJERCICIOS COMPLETADOS",
+            "",
+            "Campaña de ejemplo del motor simterm-engine.",
+            "Sustituye este texto por los créditos de tu propia campaña.",
+            "",
+            "FIN DE LA SIMULACIÓN",
+        ],
+    ),
+
+    // ---- Easter eggs: comandos ocultos temáticos (no afectan a la partida) ----
+    easter_eggs: [
+        (triggers: ["sudo"], lines: ["[sudo] No, en el polígono no."]),
+        (triggers: ["uname"], lines: ["POLIGONO 1.0 sim #1 PRACTICAS x86_64"]),
+        (triggers: ["date"], lines: ["En la simulación solo corre el reloj interno: t={clock}."]),
+        (triggers: ["hello", "hi"], lines: ["Hola, alumno. Teclea 'help' para empezar."]),
+    ],
+
+    // ---- Aforismos del comando oculto 'fortune' ----
+    fortunes: [
+        "Lee siempre el objetivo antes de actuar.",
+        "La herramienta adecuada hace la mitad del trabajo.",
+        "El sigilo se entrena, no se improvisa.",
+    ],
+
+    // ---- Palabras del minijuego 'signal' (se interceptan cifradas) ----
+    signals: ["PRACTICA", "POLIGONO", "SIMULACRO", "OBJETIVO"],
+
+    // ---- Logros propios de campaña (opcionales, data-driven) ----
+    achievements: [
+        (
+            id: "ej1-flag-leida",
+            title: "Primera flag",
+            description: "Lee la flag del primer ejercicio.",
+            trigger: ReadFile("/root/flag.txt"),
+        ),
+        (
+            id: "poligono-completo",
+            title: "Polígono completado",
+            description: "Termina todos los ejercicios de la campaña de ejemplo.",
+            trigger: CampaignComplete,
+        ),
+    ],
+
+    // ======================== EJERCICIOS (misiones) =========================
+    missions: [
+
+        // ---------------------- EJERCICIO 1: un host ----------------------
+        Mission(
+            id: "ej1-primer-contacto",
+            name: "PRIMER CONTACTO",
+            briefing: [
+                "EJERCICIO 1: una máquina sencilla con un servicio web.",
+                "Objetivo: consigue acceso y exfiltra /root/flag.txt.",
+                "Recuerda la kill chain: nmap -> enumera -> exploit -> privesc -> cat.",
+            ],
+            detection_limit: 130.0,
+            time_limit: Some(320),
+            skill: 0.55,
+            root_difficulty: 4,
+            objective: Some("/root/flag.txt"),
+            debrief: [
+                "Flag capturada. Ejercicio 1 superado.",
+                "Has visto el ciclo completo en un solo host.",
+            ],
+            entry: Active,
+            target: (
+                hostname: "training-01.range.local",
+                ip: "192.0.2.10",
+                os: "Linux 5.x (sim)",
+                services: [
+                    (port: 80, name: "http", version: "nginx 1.20 (sim)"),
+                    (port: 22, name: "ssh", version: "OpenSSH 8.4 (sim)"),
+                ],
+                vulnerabilities: [
+                    (id: "EJ1-WEB-LFI", name: "Inclusión local de ficheros", affected_service: 80, difficulty: 4, stealth_cost: 5),
+                    (id: "EJ1-WEB-UPLOAD", name: "Subida de ficheros sin filtrar", affected_service: 80, difficulty: 5, stealth_cost: 7),
+                    (id: "EJ1-SSH-WEAK", name: "Contraseña SSH débil", affected_service: 22, difficulty: 6, stealth_cost: 10),
+                ],
+                filesystem: [
+                    Dir(name: "home", children: [
+                        Dir(name: "alumno", children: [
+                            Dir(name: ".ssh", children: [
+                                File(
+                                    name: "id_rsa",
+                                    content: ["-----BEGIN OPENSSH PRIVATE KEY----- (simulada)"],
+                                    loot: Some((privesc_key: true, note: Some("Llave local: habilita la escalada segura (privesc)."))),
+                                ),
+                            ]),
+                        ]),
+                    ]),
+                    Dir(name: "var", children: [
+                        Dir(name: "www", children: [
+                            File(
+                                name: "notes.txt",
+                                content: ["TODO: cambiar la contraseña por defecto demo:demo"],
+                                loot: Some((skill: 0.05, credential: Some("demo:demo"))),
+                            ),
+                        ]),
+                    ]),
+                    Dir(name: "root", children: [
+                        File(
+                            name: "flag.txt",
+                            content: ["FLAG{ejercicio_1_completado}"],
+                            root: true,
+                        ),
+                    ]),
+                ],
+            ),
+        ),
+
+        // -------------------- EJERCICIO 2: red interna --------------------
+        Mission(
+            id: "ej2-red-interna",
+            name: "RED INTERNA",
+            briefing: [
+                "EJERCICIO 2: dos máquinas. La interesante está dentro.",
+                "Comprométe la pasarela, mapea la red ('netmap') y pivota ('pivot').",
+                "Reutiliza la credencial que encuentres para entrar con 'login'.",
+            ],
+            detection_limit: 120.0,
+            time_limit: Some(360),
+            skill: 0.6,
+            root_difficulty: 5,
+            entry: Active,
+            endings: [
+                (title: "Entregar el informe al instructor", lines: [
+                    "Entregas los datos. El instructor asiente: ejercicio impecable.",
+                ]),
+                (title: "Quedarte el botín de prácticas", lines: [
+                    "Te guardas la flag de recuerdo. Al fin y al cabo, es una simulación.",
+                ]),
+            ],
+            network: [
+                // Pasarela: punto de entrada, enlaza con la base de datos interna.
+                (
+                    entry: true,
+                    links: ["db"],
+                    target: (
+                        hostname: "gw-02.range.local",
+                        ip: "192.0.2.20",
+                        os: "Linux 5.x (sim)",
+                        services: [
+                            (port: 80, name: "http", version: "nginx 1.20 (sim)"),
+                        ],
+                        vulnerabilities: [
+                            (id: "EJ2-WEB-RCE", name: "Ejecución remota en panel web", affected_service: 80, difficulty: 4, stealth_cost: 6),
+                        ],
+                        filesystem: [
+                            Dir(name: "home", children: [
+                                Dir(name: "svc", children: [
+                                    Dir(name: ".ssh", children: [
+                                        File(name: "id_rsa", content: ["(llave simulada)"], loot: Some((privesc_key: true))),
+                                    ]),
+                                ]),
+                            ]),
+                            Dir(name: "etc", children: [
+                                Dir(name: "app", children: [
+                                    File(
+                                        name: "cred.env",
+                                        content: ["DB_TOKEN=range-key   # reutilizable en la base de datos interna"],
+                                        loot: Some((credential: Some("DB_TOKEN=range-key"), foothold_token: Some("range-key"), note: Some("Esta credencial abre 'db' con 'login'."))),
+                                    ),
+                                ]),
+                            ]),
+                        ],
+                    ),
+                ),
+                // Base de datos interna: acepta la credencial reutilizada y guarda el objetivo.
+                (
+                    entry: false,
+                    objective: Some("/root/loot.dat"),
+                    target: (
+                        hostname: "db-03.range.local",
+                        ip: "10.10.0.3",
+                        os: "Linux 5.x (sim)",
+                        services: [
+                            (port: 5432, name: "pgsql", version: "PostgreSQL 14 (sim)"),
+                        ],
+                        vulnerabilities: [
+                            (id: "EJ2-PG-RCE", name: "RCE vía COPY en PostgreSQL", affected_service: 5432, difficulty: 6, stealth_cost: 9),
+                        ],
+                        accepts_token: Some("range-key"),
+                        filesystem: [
+                            Dir(name: "var", children: [
+                                Dir(name: "lib", children: [
+                                    Dir(name: "db", children: [
+                                        File(name: ".restore", content: ["(token de recuperación simulado)"], loot: Some((privesc_key: true))),
+                                    ]),
+                                ]),
+                            ]),
+                            Dir(name: "root", children: [
+                                File(
+                                    name: "loot.dat",
+                                    content: ["FLAG{ejercicio_2_completado}", "Datos de prácticas exfiltrados."],
+                                    root: true,
+                                ),
+                            ]),
+                        ],
+                    ),
+                ),
+            ],
+        ),
+    ],
+)
