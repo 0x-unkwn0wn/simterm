@@ -233,7 +233,7 @@ fn post_root(game: &GameState, inspected: &mut HashSet<String>) -> Option<String
     }
 
     if let Some(obj) = &game.objective {
-        return Some(format!("cat {obj}"));
+        return Some(format!("exfil {obj}"));
     }
 
     if !game.is_single_host() {
@@ -490,6 +490,7 @@ mod tests {
             Command::Login => actions::login(game),
             Command::Privesc => actions::privesc(game),
             Command::Cat(path) => actions::fs_cat(game, path),
+            Command::Exfil(path) => actions::fs_exfil(game, path),
             Command::John(path) => actions::john(game, path),
             Command::Strings(path) => actions::strings(game, path),
             Command::Disasm(path) => actions::disasm(game, path),

@@ -112,9 +112,9 @@ fn arg_candidates(state: &GameState, verb: &str, frag: &str) -> Vec<String> {
     let verb = verb.to_lowercase();
     match verb.as_str() {
         // Rutas del sistema de archivos (solo con shell).
-        "ls" | "dir" | "cat" | "read" | "type" | "cd" | "john" | "hashcat" | "strings"
-        | "disasm" | "objdump" | "r2" | "solve" | "base64" | "xor" | "grep" | "head" | "tail"
-        | "wc" | "file" => path_candidates(state, frag),
+        "ls" | "dir" | "cat" | "read" | "type" | "exfil" | "cd" | "john" | "hashcat"
+        | "strings" | "disasm" | "objdump" | "r2" | "solve" | "base64" | "xor" | "grep"
+        | "head" | "tail" | "wc" | "file" => path_candidates(state, frag),
         "sudo" => ["-l"]
             .iter()
             .filter(|c| c.starts_with(frag))

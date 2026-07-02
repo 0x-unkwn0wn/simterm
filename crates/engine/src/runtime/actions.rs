@@ -634,7 +634,7 @@ pub fn privesc(state: &mut GameState) {
 fn post_root_objective(state: &mut GameState) {
     match state.objective {
         Some(_) => state.log(String::from(
-            "Ya tienes los privilegios. Localiza y exfiltra el objetivo con 'cat'.",
+            "Ya tienes los privilegios. Localiza el objetivo y extráelo con 'exfil <ruta>'.",
         )),
         None => {
             if state.is_single_host() {
@@ -872,7 +872,7 @@ pub fn fs_find(state: &mut GameState, needle: Option<String>) {
     }
 }
 
-/// `cat <ruta>`: lee un fichero. Aplica botín y comprueba el objetivo.
+/// `cat <ruta>`: lee un fichero y aplica botín. No completa objetivos.
 pub fn fs_cat(state: &mut GameState, path: Option<String>) {
     if !require_shell(state) {
         return;
@@ -933,17 +933,16 @@ pub fn fs_cat(state: &mut GameState, path: Option<String>) {
                 return;
             }
 
-            deliver_file(state, &comps, &path_disp, &content, &loot);
+            deliver_file(state, &path_disp, &content, &loot);
         }
     }
 }
 
 /// Vuelca el contenido en claro de un fichero, aplica su botín (la primera vez)
-/// y comprueba si es el objetivo del nivel. Lo usan `cat` (fichero normal) y los
+/// y marca el fichero como leído. Lo usan `cat` (fichero normal) y los
 /// decodificadores (`base64`/`xor`), una vez revelado el claro.
 fn deliver_file(
     state: &mut GameState,
-    comps: &[String],
     path_disp: &str,
     content: &[String],
     loot: &Option<filesystem::Loot>,
@@ -988,13 +987,49 @@ fn deliver_file(
     }
 
     state.unlock_campaign_read_file(path_disp);
+}
 
-    // ¿Es el objetivo del nivel? Entonces se exfiltra y se completa.
-    if state.is_objective(comps) {
-        state.log(format!(
-            "[exfil] Datos del objetivo extraídos de {path_disp}."
-        ));
-        state.complete_level();
+/// `exfil <ruta>`: extrae el fichero objetivo y completa el nivel.
+pub fn fs_exfil(state: &mut GameState, path: Option<String>) {
+    if !require_shell(state) {
+        return;
+    }
+    let arg = match path {
+        Some(p) => p,
+        None => {
+            state.log(String::from("uso: exfil <ruta-objetivo>"));
+            return;
+        }
+    };
+
+    let comps = filesystem::normalize(&state.cwd, &arg);
+    let path_disp = filesystem::path_string(&comps);
+
+    match filesystem::read_file(&state.target.filesystem, &comps) {
+        filesystem::ReadOutcome::NotFound => {
+            state.log(format!("exfil: {arg}: No such file or directory"))
+        }
+        filesystem::ReadOutcome::IsDir => state.log(format!("exfil: {arg}: Is a directory")),
+        filesystem::ReadOutcome::File { root, .. } => {
+            if root && !state.is_root {
+                state.log(format!("exfil: {path_disp}: Permission denied"));
+                return;
+            }
+            state.advance_clock(1);
+            state.unlock_campaign_read_file(&path_disp);
+
+            if !state.is_objective(&comps) {
+                state.log(format!(
+                    "[exfil] {path_disp} no coincide con el objetivo de la misión."
+                ));
+                return;
+            }
+
+            state.log(format!(
+                "[exfil] Datos del objetivo extraídos de {path_disp}."
+            ));
+            state.complete_level();
+        }
     }
 }
 
@@ -1019,7 +1054,7 @@ fn report_reward(state: &mut GameState, reward: &Reward) {
 }
 
 /// `john <ruta>` (alias `hashcat`): cracking OFFLINE de un hash saqueado. Hay que
-/// haberlo exfiltrado antes (`cat`). Gasta reloj, no ruido de red.
+/// haber leído antes el fichero con `cat`. Gasta reloj, no ruido de red.
 pub fn john(state: &mut GameState, path: Option<String>) {
     if !require_shell(state) {
         return;
@@ -1028,7 +1063,7 @@ pub fn john(state: &mut GameState, path: Option<String>) {
         Some(p) => p,
         None => {
             state.log(String::from(
-                "uso: john <ruta-del-hash>  (exfiltra antes el fichero con 'cat')",
+                "uso: john <ruta-del-hash>  (lee antes el fichero con 'cat')",
             ));
             return;
         }
@@ -1045,7 +1080,7 @@ pub fn john(state: &mut GameState, path: Option<String>) {
     };
     if !state.looted_paths.iter().any(|p| p == &path_disp) {
         state.log(format!(
-            "[john] Primero exfiltra el hash leyendo el fichero: 'cat {arg}'."
+            "[john] Primero lee el hash con: 'cat {arg}'."
         ));
         return;
     }
@@ -1222,7 +1257,7 @@ pub fn decode_cmd(state: &mut GameState, tool: &str, path: Option<String>, key: 
                 filesystem::ReadOutcome::File { loot, .. } => loot,
                 _ => None,
             };
-            deliver_file(state, &comps, &path_disp, &content, &loot);
+            deliver_file(state, &path_disp, &content, &loot);
         }
         filesystem::DecodeOutcome::WrongKey => {
             state.advance_clock(balance::DECODE_TIME);
@@ -1968,7 +2003,7 @@ mod tests {
     }
 
     /// `john` rompe un hash débil (con wordlist) y otorga su recompensa; exige
-    /// haber exfiltrado el fichero antes.
+    /// haber leído el fichero antes.
     #[test]
     fn john_rompe_hash_y_otorga_token() {
         let mut g = post_state_with(vec![hash_file(
@@ -1980,11 +2015,11 @@ mod tests {
         g.base_skill = 0.95; // p alta y determinista con wordlist
         g.has_wordlist = true;
 
-        // Sin exfiltrar (cat) primero, john no procede.
+        // Sin leer con cat primero, john no procede.
         john(&mut g, Some(String::from("/shadow")));
         assert!(!g.foothold_tokens.contains(&String::from("tok-x")));
 
-        fs_cat(&mut g, Some(String::from("/shadow"))); // exfiltra el hash
+        fs_cat(&mut g, Some(String::from("/shadow"))); // saquea el hash
         john(&mut g, Some(String::from("/shadow")));
         assert!(
             g.foothold_tokens.contains(&String::from("tok-x")),
@@ -2147,6 +2182,8 @@ mod tests {
         privesc(&mut g);
         assert!(g.is_root);
         fs_cat(&mut g, Some(String::from("/root/secret.dat")));
+        assert_eq!(g.level_index, 0, "cat no completa el objetivo");
+        fs_exfil(&mut g, Some(String::from("/root/secret.dat")));
         assert_eq!(g.level_index, 1, "completar m0 avanza a m1");
     }
 
@@ -2229,6 +2266,8 @@ mod tests {
         privesc(&mut g);
         assert!(g.is_root);
         fs_cat(&mut g, Some(String::from("/root/blueprints.dat")));
+        assert_eq!(g.level_index, idx, "cat no completa el objetivo");
+        fs_exfil(&mut g, Some(String::from("/root/blueprints.dat")));
         assert_eq!(
             g.level_index,
             idx + 1,

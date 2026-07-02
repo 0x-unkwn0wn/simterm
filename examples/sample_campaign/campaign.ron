@@ -159,7 +159,7 @@ Campaign(
             briefing: [
                 "EJERCICIO 1: una máquina sencilla con un servicio web.",
                 "Objetivo: consigue acceso y exfiltra /root/flag.txt.",
-                "Recuerda la kill chain: nmap -> enumera -> exploit -> privesc -> cat.",
+                "Recuerda la kill chain: nmap -> enumera -> exploit -> privesc -> exfil.",
             ],
             detection_limit: 130.0,
             time_limit: Some(320),

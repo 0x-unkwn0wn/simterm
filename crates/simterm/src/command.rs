@@ -53,6 +53,7 @@ pub enum Command {
     // --- VFS (fase POST) ---
     Ls(Option<String>),
     Cat(Option<String>),
+    Exfil(Option<String>),
     Cd(Option<String>),
     Pwd,
     Find(Option<String>),
@@ -176,6 +177,7 @@ pub fn parse(input: &str) -> Command {
         "sudo" if arg == Some("-l") => Command::LocalEnum(String::from("sudo")),
         "ls" | "dir" => Command::Ls(arg.map(str::to_string)),
         "cat" | "read" | "type" => Command::Cat(arg.map(str::to_string)),
+        "exfil" => Command::Exfil(arg.map(str::to_string)),
         "cd" => Command::Cd(arg.map(str::to_string)),
         "pwd" => Command::Pwd,
         "find" => Command::Find(arg.map(str::to_string)),

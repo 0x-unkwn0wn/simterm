@@ -536,6 +536,7 @@ impl App {
             Command::LocalEnum(tool) => actions::local_enum(&mut self.game, &tool),
             Command::Ls(path) => actions::fs_ls(&mut self.game, path),
             Command::Cat(path) => actions::fs_cat(&mut self.game, path),
+            Command::Exfil(path) => actions::fs_exfil(&mut self.game, path),
             Command::Cd(path) => actions::fs_cd(&mut self.game, path),
             Command::Pwd => actions::fs_pwd(&mut self.game),
             Command::Find(needle) => actions::fs_find(&mut self.game, needle),

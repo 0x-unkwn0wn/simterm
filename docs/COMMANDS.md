@@ -125,7 +125,8 @@ These commands are available after the campaign gives the player a foothold.
 | `ls [path]` | `dir [path]` | List a directory or file. |
 | `cd [path]` | | Change current directory. |
 | `pwd` | | Show current directory. |
-| `cat <path>` | `read <path>`, `type <path>` | Read a file. |
+| `cat <path>` | `read <path>`, `type <path>` | Read a file and collect local loot. |
+| `exfil <path>` | | Exfiltrate the mission objective file and complete the level. |
 | `find [text]` | | Search file and directory names. |
 | `whoami` | `id` | Show current session identity. |
 | `privesc` | `escalate`, `root` | Attempt local privilege escalation. |

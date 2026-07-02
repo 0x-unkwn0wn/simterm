@@ -106,7 +106,7 @@ core command flow is:
 - `privesc` - attempt local privilege escalation.
 - `loot` - show collected credentials and notes.
 - `netmap` and `pivot <host>` - move through multi-host networks.
-- `ls`, `cd`, `pwd`, `cat`, `find`, `whoami` - explore the post-exploitation
+- `ls`, `cd`, `pwd`, `cat`, `exfil`, `find`, `whoami` - explore the post-exploitation
   virtual filesystem.
 - `uname`, `id`, `ps`, `netstat`, `ifconfig`, `env`, `grep`, `head`, `wc` -
   emulated POSIX shell commands, synthesized from the host definition.
