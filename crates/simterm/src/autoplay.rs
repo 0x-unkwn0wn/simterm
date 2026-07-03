@@ -98,7 +98,7 @@ fn command(cmd: impl Into<String>) -> Option<Decision> {
 }
 
 fn decide(game: &GameState, mode: AutoplayMode, inspected: &mut HashSet<String>) -> Option<Decision> {
-    match game.outcome {
+    match game.core.outcome {
         Some(GameOutcome::Victory) => return command("quit"),
         Some(GameOutcome::Defeat) => return None,
         None => {}
@@ -117,7 +117,7 @@ fn decide(game: &GameState, mode: AutoplayMode, inspected: &mut HashSet<String>)
         return pre_foothold(game, mode);
     }
 
-    if !game.is_root {
+    if !game.pentest().is_root {
         return post_user(game, inspected);
     }
 
@@ -125,28 +125,30 @@ fn decide(game: &GameState, mode: AutoplayMode, inspected: &mut HashSet<String>)
 }
 
 fn pre_foothold(game: &GameState, mode: AutoplayMode) -> Option<Decision> {
-    if matches!(game.entry, EntryVector::Pivot { .. }) && !game.pivoted {
+    if matches!(game.pentest().entry, EntryVector::Pivot { .. }) && !game.pentest().pivoted {
         return command("connect");
     }
 
-    if let Some(tok) = &game.target.accepts_token {
-        if game.foothold_tokens.contains(tok) {
+    if let Some(tok) = &game.pentest().target.accepts_token {
+        if game.pentest().foothold_tokens.contains(tok) {
             return command("login");
         }
     }
 
     let candidate = best_vuln(game, mode).or_else(|| best_vuln(game, AutoplayMode::Normal))?;
     if !game
+        .pentest()
         .discovered_ports
         .contains(&candidate.vuln.affected_service)
     {
-        return command(match game.entry {
+        return command(match game.pentest().entry {
             EntryVector::Passive => String::from("sniff"),
             _ => String::from("nmap"),
         });
     }
 
     let finding = game
+        .pentest()
         .intel
         .iter()
         .find(|f| f.real_vuln_id.as_deref() == Some(candidate.vuln.id.as_str()));
@@ -182,12 +184,14 @@ fn fallback_after_failed_exploit(
     let fallback = fallback?;
 
     if !game
+        .pentest()
         .discovered_ports
         .contains(&fallback.vuln.affected_service)
     {
         return command("nmap");
     }
     if let Some(f) = game
+        .pentest()
         .intel
         .iter()
         .find(|f| f.real_vuln_id.as_deref() == Some(fallback.vuln.id.as_str()))
@@ -210,8 +214,8 @@ fn post_user(game: &GameState, inspected: &mut HashSet<String>) -> Option<Decisi
         return command(cmd);
     }
 
-    if !game.privesc_unlocked {
-        if let Some(local) = &game.target.local_privesc {
+    if !game.pentest().privesc_unlocked {
+        if let Some(local) = &game.pentest().target.local_privesc {
             let _ = local;
             return command("linpeas");
         }
@@ -232,7 +236,7 @@ fn post_root(game: &GameState, inspected: &mut HashSet<String>) -> Option<String
         return Some(cmd);
     }
 
-    if let Some(obj) = &game.objective {
+    if let Some(obj) = &game.pentest().objective {
         return Some(format!("exfil {obj}"));
     }
 
@@ -256,12 +260,12 @@ fn next_loot_command(
     include_privesc_keys: bool,
 ) -> Option<String> {
     let mut files = Vec::new();
-    collect_files(&game.target.filesystem, &mut Vec::new(), &mut files);
+    collect_files(&game.pentest().target.filesystem, &mut Vec::new(), &mut files);
 
     files
         .into_iter()
         .filter(|f| include_root || !f.root)
-        .filter(|f| !game.looted_paths.contains(&f.path))
+        .filter(|f| !game.pentest().looted_paths.contains(&f.path))
         .filter(|f| {
             f.loot
                 .as_ref()
@@ -283,15 +287,15 @@ fn next_loot_command(
 
 fn next_crack_or_solve_command(game: &GameState, inspected: &mut HashSet<String>) -> Option<String> {
     let mut files = Vec::new();
-    collect_files(&game.target.filesystem, &mut Vec::new(), &mut files);
+    collect_files(&game.pentest().target.filesystem, &mut Vec::new(), &mut files);
 
     for f in &files {
-        if f.root && !game.is_root {
+        if f.root && !game.pentest().is_root {
             continue;
         }
         if f.binary_secret.is_some()
             && !inspected.contains(&f.path)
-            && !game.solved_paths.contains(&f.path)
+            && !game.pentest().solved_paths.contains(&f.path)
         {
             inspected.insert(f.path.clone());
             return Some(format!("strings {}", f.path));
@@ -299,16 +303,16 @@ fn next_crack_or_solve_command(game: &GameState, inspected: &mut HashSet<String>
     }
 
     for f in &files {
-        if f.root && !game.is_root {
+        if f.root && !game.pentest().is_root {
             continue;
         }
         let Some(loot) = &f.loot else {
             continue;
         };
         if let Some(hash) = &loot.hash {
-            if (!hash.needs_wordlist || game.has_wordlist)
-                && game.looted_paths.contains(&f.path)
-                && !game.cracked_paths.contains(&f.path)
+            if (!hash.needs_wordlist || game.pentest().has_wordlist)
+                && game.pentest().looted_paths.contains(&f.path)
+                && !game.pentest().cracked_paths.contains(&f.path)
             {
                 return Some(format!("john {}", f.path));
             }
@@ -316,13 +320,13 @@ fn next_crack_or_solve_command(game: &GameState, inspected: &mut HashSet<String>
     }
 
     for f in &files {
-        if f.root && !game.is_root {
+        if f.root && !game.pentest().is_root {
             continue;
         }
         let Some(secret) = &f.binary_secret else {
             continue;
         };
-        if !game.solved_paths.contains(&f.path) {
+        if !game.pentest().solved_paths.contains(&f.path) {
             return Some(format!("solve {} {secret}", f.path));
         }
     }
@@ -405,6 +409,7 @@ fn best_vuln(game: &GameState, mode: AutoplayMode) -> Option<VulnCandidate<'_>> 
 
 fn sorted_vulns(game: &GameState, mode: AutoplayMode) -> Vec<VulnCandidate<'_>> {
     let mut candidates: Vec<_> = game
+        .pentest()
         .target
         .vulnerabilities
         .iter()
@@ -413,12 +418,13 @@ fn sorted_vulns(game: &GameState, mode: AutoplayMode) -> Vec<VulnCandidate<'_>> 
         })
         .filter_map(|vuln| {
             let service = game
+                .pentest()
                 .target
                 .services
                 .iter()
                 .find(|s| s.port == vuln.affected_service)?;
             if let Some(required) = &service.requires {
-                if !game.foothold_tokens.contains(required) {
+                if !game.pentest().foothold_tokens.contains(required) {
                     return None;
                 }
             }
@@ -511,14 +517,14 @@ mod tests {
         let mut inspected = HashSet::new();
 
         // Victoria -> 'quit'.
-        game.outcome = Some(GameOutcome::Victory);
+        game.core.outcome = Some(GameOutcome::Victory);
         assert!(matches!(
             decide(&game, AutoplayMode::Strict, &mut inspected),
             Some(Decision::Command(ref c)) if c == "quit"
         ));
 
         // Derrota -> no hay nada que hacer.
-        game.outcome = Some(GameOutcome::Defeat);
+        game.core.outcome = Some(GameOutcome::Defeat);
         assert!(decide(&game, AutoplayMode::Strict, &mut inspected).is_none());
     }
 
@@ -538,7 +544,7 @@ mod tests {
             };
             let keep_going = run(&mut game, &cmd);
             commands.push(cmd);
-            if !keep_going || game.outcome.is_some() {
+            if !keep_going || game.core.outcome.is_some() {
                 terminated = true;
                 break;
             }

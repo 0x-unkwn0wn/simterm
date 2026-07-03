@@ -68,10 +68,43 @@ pub struct Campaign {
     /// ficticias que el motor no puede sintetizar (p. ej. `systemctl status`).
     #[serde(default)]
     pub terminal: Vec<TerminalCommand>,
+    /// Dominio del escenario: el conjunto de mecánicas de dominio que gobiernan
+    /// la campaña. Si se omite, se infiere de las `stages` (ver
+    /// [`Campaign::domain_kind`]). Ver [`DomainKind`].
+    #[serde(default)]
+    pub domain: Option<DomainKind>,
     /// Interruptores de mecánicas de dominio (kill chain, traza, VFS...). Cada uno
-    /// es opcional: si se omite, cae al default heurístico. Ver [`Features`].
+    /// es opcional: si se omite, cae al default del dominio. Ver [`Features`].
     #[serde(default)]
     pub features: Features,
+}
+
+/// Dominio de una campaña: el "tipo de escenario" que da semántica al núcleo
+/// del motor. Es un conjunto **cerrado** de dominios in-tree (sin carga dinámica
+/// de código): cada variante se corresponde con un módulo bajo `crate::domains`.
+///
+/// - [`DomainKind::Pentest`]: la kill chain de intrusión (RECON → ENUM →
+///   EXPLOIT → POST) con traza, servicios, vulnerabilidades y VFS con shell.
+/// - [`DomainKind::Bare`]: dominio **solo-datos**, sin mecánica de dominio en
+///   Rust. Progresa con las `stages`, gana/pierde por `meters` y se conduce con
+///   comandos declarativos (p. ej. `examples/demo_orbita`).
+///
+/// Si la campaña **omite** `domain`, se infiere heurísticamente (ver
+/// [`Campaign::domain_kind`]): pentest si usa las etapas por defecto, `Bare` si
+/// declara las suyas. Fijarlo explícitamente manda sobre la heurística.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum DomainKind {
+    Pentest,
+    Bare,
+}
+
+impl DomainKind {
+    /// ¿Este dominio activa por defecto las mecánicas de intrusión (kill chain,
+    /// traza, shell para el VFS)? Es la base de los defaults de [`Features`]; cada
+    /// toggle puede seguir sobreescribiéndose por separado.
+    pub fn defaults_pentest_mechanics(self) -> bool {
+        matches!(self, DomainKind::Pentest)
+    }
 }
 
 /// Interruptores por-campaña para activar/desactivar mecánicas del dominio de
@@ -157,34 +190,52 @@ fn default_signals() -> Vec<String> {
 
 impl Campaign {
     /// ¿La campaña usa las etapas por defecto (la kill chain del pentesting)? Es
-    /// el *default heurístico* de los toggles de [`Features`]: pentest si son las
-    /// de por defecto, dominio propio si declara las suyas.
+    /// la base de la *inferencia heurística* del dominio cuando `domain` se omite.
     pub fn uses_default_stages(&self) -> bool {
         self.stages == default_stages()
     }
 
+    /// Dominio efectivo de la campaña. Si `domain` está fijado, manda; si se
+    /// omite, se infiere: pentest cuando usa las etapas por defecto, `Bare`
+    /// cuando declara las suyas.
+    pub fn domain_kind(&self) -> DomainKind {
+        self.domain.unwrap_or_else(|| {
+            if self.uses_default_stages() {
+                DomainKind::Pentest
+            } else {
+                DomainKind::Bare
+            }
+        })
+    }
+
+    /// Default de las mecánicas de intrusión según el dominio activo. Cada toggle
+    /// de [`Features`] puede seguir sobreescribiéndolo por separado.
+    fn domain_pentest_default(&self) -> bool {
+        self.domain_kind().defaults_pentest_mechanics()
+    }
+
     /// ¿Mostrar la ayuda/hints de la kill chain? (toggle `features.kill_chain`,
-    /// default heurístico).
+    /// default según el dominio).
     pub fn kill_chain(&self) -> bool {
         self.features
             .kill_chain
-            .unwrap_or_else(|| self.uses_default_stages())
+            .unwrap_or_else(|| self.domain_pentest_default())
     }
 
     /// ¿Usar el medidor de detección/"traza"? (toggle `features.trace`, default
-    /// heurístico).
+    /// según el dominio).
     pub fn uses_trace(&self) -> bool {
         self.features
             .trace
-            .unwrap_or_else(|| self.uses_default_stages())
+            .unwrap_or_else(|| self.domain_pentest_default())
     }
 
     /// ¿Exigir shell (foothold) para explorar el VFS? (toggle
-    /// `features.shell_for_vfs`, default heurístico).
+    /// `features.shell_for_vfs`, default según el dominio).
     pub fn shell_for_vfs(&self) -> bool {
         self.features
             .shell_for_vfs
-            .unwrap_or_else(|| self.uses_default_stages())
+            .unwrap_or_else(|| self.domain_pentest_default())
     }
 
     /// Busca el easter egg cuyo conjunto de `triggers` contiene `verb`.

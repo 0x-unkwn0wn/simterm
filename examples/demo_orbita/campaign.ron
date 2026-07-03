@@ -17,6 +17,11 @@ Campaign(
     name: "ORBITA-7",
     language: es,
 
+    // Dominio SOLO-DATOS: sin mecánica de intrusión en Rust. Progresa por las
+    // stages, gana/pierde por meters y se conduce con comandos declarativos.
+    // (Podría omitirse: al declarar stages propias se inferiría Bare igual.)
+    domain: Some(Bare),
+
     // Etapas PROPIAS del dominio (no RECON/ENUM/EXPLOIT/POST).
     stages: ["ARRANQUE", "DIAGNÓSTICO", "ORIENTACIÓN", "ENLACE"],
 

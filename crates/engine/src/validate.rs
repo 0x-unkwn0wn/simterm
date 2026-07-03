@@ -697,6 +697,7 @@ mod tests {
             language: Language::Es,
             intro: vec![],
             stages: crate::model::campaign::default_stages(),
+            domain: None,
             features: Default::default(),
             theme: Theme::default(),
             easter_eggs: vec![],

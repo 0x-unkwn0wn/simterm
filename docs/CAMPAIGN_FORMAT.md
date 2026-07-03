@@ -32,6 +32,7 @@ Most fields have defaults. Define only the fields your campaign needs.
 Campaign(
     name: "My Campaign",
     language: en,
+    domain: None,  // Pentest | Bare; None = infer from stages
     stages: ["RECON", "ENUM", "EXPLOIT", "POST"],
     intro: ["Opening line", "..."],
     missions: [ Mission(...) ],
@@ -52,6 +53,7 @@ Campaign(
 |---|---|---|---|
 | `name` | string | required | Campaign name. |
 | `language` | `es` or `en` | `es` | Language for generic engine/UI text. Campaign-authored story text is not translated automatically. |
+| `domain` | `Pentest` \| `Bare` (optional) | inferred | The scenario domain. If omitted, it is inferred from `stages` (pentest if they are the default kill chain, otherwise `Bare`). See [Domains, Stages, and Features](#domains-stages-and-features). |
 | `stages` | string list | kill chain | Ordered progression stage names. Default is the pentest kill chain (`RECON/ENUM/EXPLOIT/POST`). Declaring your own marks a non-pentest domain. See [Domains, Stages, and Features](#domains-stages-and-features). |
 | `intro` | string list | `[]` | Text shown when the campaign starts. |
 | `missions` | `Mission` list | required | Ordered mission sequence. Must not be empty. |
@@ -68,12 +70,37 @@ Campaign(
 
 ## Domains, Stages, and Features
 
-SimTerm is not hacking-specific. The pentesting kill chain is just the **default
-domain**; the engine core (terminal emulation, campaign progression, meters,
-declarative commands, VFS) is domain-agnostic. A campaign becomes a different
-domain — forensics, operating a satellite, piloting a ship — purely with data.
-See [`examples/demo_orbita`](../examples/demo_orbita/campaign.ron) for a complete
+SimTerm is not hacking-specific. The pentesting kill chain is just one **domain**;
+the engine core (terminal emulation, campaign progression, meters, declarative
+commands, VFS) is domain-agnostic. A campaign becomes a different domain —
+forensics, operating a satellite, piloting a ship — purely with data. See
+[`examples/demo_orbita`](../examples/demo_orbita/campaign.ron) for a complete
 non-hacking campaign (rescue a space probe) driven entirely by data.
+
+### `domain`
+
+`domain` names the scenario domain from a closed, in-tree set:
+
+- `Pentest` — the intrusion kill chain (recon → enum → exploit → post) with a
+  trace meter, services, vulnerabilities, and a shell-gated VFS.
+- `Bare` — a **data-only** domain with no Rust-side domain mechanics: it
+  progresses through `stages`, wins/loses through [`meters`](#meters), and is
+  driven by [declarative commands](#commands-campaigncommand).
+
+```ron
+domain: Some(Bare),
+```
+
+If `domain` is omitted, it is **inferred**: `Pentest` when the campaign keeps the
+default kill-chain stages, `Bare` when it declares its own. The domain sets the
+defaults for the `features` toggles below; setting `domain` explicitly is clearer
+than relying on the stages heuristic, and either can still be overridden per
+toggle.
+
+> Under the hood the domain is stored as a closed `DomainState` enum behind a
+> `Domain` trait, so the runtime and frontend are shared across domains. Today the
+> only domain with Rust mechanics is `Pentest`; `Bare` campaigns reuse the
+> generic core. See [Architecture](ARCHITECTURE.md#domains).
 
 ### `stages`
 
@@ -91,14 +118,14 @@ Pentest missions advance stages through their built-in verbs (`nmap` reaches
 
 ### `features`
 
-Whether a campaign uses **default stages** is the domain signal: a campaign that
-keeps the kill chain is treated as pentest; one that declares its own stages is
-treated as its own domain (its own commands in help, no kill-chain hints, its own
+The active [`domain`](#domain) sets the defaults: a `Pentest` domain turns the
+kill-chain mechanics on (kill-chain help, trace meter, shell-gated VFS); a `Bare`
+domain turns them off (its own commands in help, no kill-chain hints, its own
 meters instead of a trace bar, freely explorable VFS…).
 
-`features` lets you override that heuristic per toggle. Each is optional; when
-omitted it falls back to the stages heuristic, so you can **mix** — e.g. a
-forensics domain that still wants a shell-gated VFS.
+`features` lets you override those defaults per toggle. Each is optional; when
+omitted it falls back to the domain default, so you can **mix** — e.g. a
+forensics (`Bare`) domain that still wants a shell-gated VFS.
 
 ```ron
 features: (

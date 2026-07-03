@@ -14,7 +14,7 @@ impl App {
     /// (sustituyendo `{clock}`) y devuelve `true`; si no, devuelve `false` para
     /// que el dispatcher siga probando (o responda `command not found`).
     pub(super) fn try_easter(&mut self, verb: &str) -> bool {
-        let clock = self.game.clock;
+        let clock = self.game.core.clock;
         let lines: Option<Vec<String>> = self.game.campaign.easter_egg(verb).map(|egg| {
             egg.lines
                 .iter()

@@ -34,7 +34,9 @@ pub mod validate;
 
 // --- Re-exports de conveniencia para los frontends ---
 
-pub use model::campaign::{Campaign, CampaignAchievement, CampaignAchievementTrigger, Features};
+pub use model::campaign::{
+    Campaign, CampaignAchievement, CampaignAchievementTrigger, DomainKind, Features,
+};
 pub use model::command::{CampaignCommand, CommandCondition, CommandEffect};
 pub use model::filesystem::{self, FsNode, Loot};
 pub use model::meter::{MeterDef, MeterTrigger, OnLimit};
@@ -174,9 +176,9 @@ mod demo_orbita_tests {
 
         // El arranque de un dominio propio NO debe filtrar hints de la kill chain.
         assert!(
-            !g.logs.iter().any(|l| l.contains("nmap") || l.contains("Traza")),
+            !g.core.logs.iter().any(|l| l.contains("nmap") || l.contains("Traza")),
             "no deben colarse hints pentest en el arranque: {:?}",
-            g.logs
+            g.core.logs
         );
 
         assert!(actions::campaign_command(&mut g, "encender"));
@@ -192,10 +194,10 @@ mod demo_orbita_tests {
         assert!(g.core.awaiting_choice, "el enlace completo abre el final");
         // El cierre es neutral: ni "exfiltrado" ni "traza" (mecánica pentest).
         assert!(
-            g.logs.iter().any(|l| l.contains("NIVEL COMPLETADO")),
+            g.core.logs.iter().any(|l| l.contains("NIVEL COMPLETADO")),
             "cierre neutral esperado"
         );
-        assert!(!g.logs.iter().any(|l| l.contains("exfiltrado")));
+        assert!(!g.core.logs.iter().any(|l| l.contains("exfiltrado")));
         assert!(
             g.core
                 .last_summary
@@ -205,7 +207,7 @@ mod demo_orbita_tests {
             g.core.last_summary
         );
         g.resolve_ending(0);
-        assert_eq!(g.outcome, Some(GameOutcome::Victory));
+        assert_eq!(g.core.outcome, Some(GameOutcome::Victory));
     }
 
     /// El VFS es explorable sin "shell" en un dominio propio (shell_for_vfs
@@ -217,9 +219,9 @@ mod demo_orbita_tests {
         actions::fs_ls(&mut g, None);
         actions::fs_cat(&mut g, Some(String::from("/bitacora.log")));
         assert!(
-            g.logs.iter().any(|l| l.contains("Modo supervivencia")),
+            g.core.logs.iter().any(|l| l.contains("Modo supervivencia")),
             "cat debe leer el fichero sin exigir shell: {:?}",
-            g.logs
+            g.core.logs
         );
     }
 
@@ -231,7 +233,7 @@ mod demo_orbita_tests {
         actions::campaign_command(&mut g, "orientar"); // 7 -> 4
         actions::campaign_command(&mut g, "transmitir"); // 4 -> 0 => Fail
         assert_eq!(
-            g.outcome,
+            g.core.outcome,
             Some(GameOutcome::Defeat),
             "sin recargar con paneles, la batería se agota y la sonda muere"
         );

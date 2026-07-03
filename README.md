@@ -28,10 +28,13 @@ simterm-engine (library) + experience data (.ron) -> simterm terminal experience
 - Command-driven runtime with generic stages, meters (fuel/oxygen/progress with
   win/lose outcomes), state transitions, branching outcomes, logs, and
   campaign-defined flavor.
-- Domain-agnostic core: the pentest kill chain is just one domain. Build a
-  forensics, satellite, or spacecraft experience purely in data, with the hacking
-  mechanics (kill-chain help, trace meter, shell-gated files, `nmap`/`exploit`
-  verbs) toggled off via campaign `features`. See `examples/demo_orbita`.
+- Domain-agnostic core: the pentest kill chain is just one **domain**. A campaign
+  picks its domain with the `domain` field (a closed, in-tree set backed by a
+  `DomainState` enum + `Domain` trait; inferred from `stages` when omitted). Build
+  a forensics, satellite, or spacecraft experience purely in data as a `Bare`
+  domain — the hacking mechanics (kill-chain help, trace meter, shell-gated files,
+  `nmap`/`exploit` verbs) are off, or fine-tuned per toggle via `features`. See
+  `examples/demo_orbita`.
 - Generic content boundaries: framework mechanics stay in Rust, while story,
   targets, entities, files, objectives, UI text, and endings live in data.
 - Virtual filesystem support for terminal-native exploration, clues, rewards,

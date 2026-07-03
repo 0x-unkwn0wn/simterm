@@ -331,7 +331,7 @@ fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
 }
 
 fn run(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
-    while app.game.running {
+    while app.game.core.running {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         // Durante una animación refrescamos más a menudo para que sea fluida.

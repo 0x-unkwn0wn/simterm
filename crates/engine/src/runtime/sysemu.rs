@@ -39,7 +39,7 @@ impl ShellOutput {
 fn username(state: &GameState) -> &'static str {
     if !state.has_foothold() {
         "operator"
-    } else if state.is_root {
+    } else if state.pentest().is_root {
         "root"
     } else {
         "user"
@@ -47,7 +47,7 @@ fn username(state: &GameState) -> &'static str {
 }
 
 fn uid(state: &GameState) -> u32 {
-    if state.has_foothold() && state.is_root {
+    if state.has_foothold() && state.pentest().is_root {
         0
     } else {
         1000
@@ -55,7 +55,7 @@ fn uid(state: &GameState) -> u32 {
 }
 
 fn home(state: &GameState) -> String {
-    if state.has_foothold() && state.is_root {
+    if state.has_foothold() && state.pentest().is_root {
         String::from("/root")
     } else {
         format!("/home/{}", username(state))
@@ -77,7 +77,7 @@ pub fn env_pairs(state: &GameState) -> BTreeMap<String, String> {
     if state.has_foothold() {
         env.insert(
             String::from("HOSTNAME"),
-            state.target.short_name().to_string(),
+            state.pentest().target.short_name().to_string(),
         );
     }
     // Definidas por la campaña (pueden sobreescribir derivadas como SHELL/PATH).
@@ -153,11 +153,11 @@ pub fn expand_vars(state: &GameState, input: &str) -> String {
 /// usan los comandos de terminal autorados por la campaña.
 pub fn render(state: &GameState, input: &str) -> String {
     let mut s = input.to_string();
-    s = s.replace("{clock}", &state.clock.to_string());
+    s = s.replace("{clock}", &state.core.clock.to_string());
     s = s.replace("{user}", username(state));
-    s = s.replace("{host}", state.target.short_name());
-    s = s.replace("{ip}", &state.target.ip);
-    s = s.replace("{os}", &state.target.os);
+    s = s.replace("{host}", state.pentest().target.short_name());
+    s = s.replace("{ip}", &state.pentest().target.ip);
+    s = s.replace("{os}", &state.pentest().target.os);
     s = s.replace("{cwd}", &state.cwd_display());
     // {env:NOMBRE}
     while let Some(start) = s.find("{env:") {
@@ -199,8 +199,8 @@ fn process_for_service(name: &str) -> &'static str {
 }
 
 fn uname(state: &GameState, args: &[String]) -> ShellOutput {
-    let host = state.target.short_name();
-    let os = &state.target.os;
+    let host = state.pentest().target.short_name();
+    let os = &state.pentest().target.os;
     let flags: String = args.iter().flat_map(|a| a.chars()).collect();
     let all = args.iter().any(|a| a == "-a" || a.contains('a'));
     let line = if all {
@@ -219,9 +219,9 @@ fn uname(state: &GameState, args: &[String]) -> ShellOutput {
 
 fn hostname(state: &GameState, args: &[String]) -> ShellOutput {
     let line = if args.iter().any(|a| a == "-f" || a == "--fqdn") {
-        state.target.hostname.clone()
+        state.pentest().target.hostname.clone()
     } else {
-        state.target.short_name().to_string()
+        state.pentest().target.short_name().to_string()
     };
     ShellOutput::ok(vec![line])
 }
@@ -245,7 +245,7 @@ fn ps(state: &GameState) -> ShellOutput {
     };
     row(&mut lines, "root", "/sbin/init", &mut pid);
     row(&mut lines, "root", "/usr/sbin/sshd", &mut pid);
-    for s in &state.target.services {
+    for s in &state.pentest().target.services {
         let user = match s.name.to_lowercase().as_str() {
             "http" | "https" | "http-proxy" | "http-alt" => "www-data",
             "pgsql" | "postgresql" => "postgres",
@@ -267,7 +267,7 @@ fn netstat(state: &GameState) -> ShellOutput {
     let mut lines = vec![String::from(
         "Proto Recv-Q Send-Q Local Address           Foreign Address         State",
     )];
-    for s in &state.target.services {
+    for s in &state.pentest().target.services {
         lines.push(format!(
             "tcp        0      0 {:<23} {:<23} LISTEN",
             format!("0.0.0.0:{}", s.port),
@@ -278,7 +278,7 @@ fn netstat(state: &GameState) -> ShellOutput {
 }
 
 fn ifconfig(state: &GameState) -> ShellOutput {
-    let ip = &state.target.ip;
+    let ip = &state.pentest().target.ip;
     ShellOutput::ok(vec![
         String::from("eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500"),
         format!("        inet {ip}  netmask 255.255.255.0  broadcast 0.0.0.0"),
@@ -291,7 +291,7 @@ fn ifconfig(state: &GameState) -> ShellOutput {
 fn ip_cmd(state: &GameState, args: &[String]) -> ShellOutput {
     // `ip a` / `ip addr`: variante compacta de ifconfig.
     if args.iter().any(|a| a.starts_with('a')) {
-        let ip = &state.target.ip;
+        let ip = &state.pentest().target.ip;
         ShellOutput::ok(vec![
             String::from("1: lo: <LOOPBACK,UP,LOWER_UP>"),
             String::from("    inet 127.0.0.1/8 scope host lo"),
@@ -343,8 +343,8 @@ fn export_cmd(state: &mut GameState, args: &[String]) -> ShellOutput {
 /// Lee el contenido en claro de un fichero del VFS, respetando permisos de root.
 /// Devuelve `Err(ShellOutput)` con el error POSIX apropiado si no procede.
 fn read_lines(state: &GameState, arg: &str) -> Result<Vec<String>, ShellOutput> {
-    let comps = filesystem::normalize(&state.cwd, arg);
-    match filesystem::read_file(&state.target.filesystem, &comps) {
+    let comps = filesystem::normalize(&state.core.cwd, arg);
+    match filesystem::read_file(&state.pentest().target.filesystem, &comps) {
         ReadOutcome::NotFound => Err(ShellOutput::code(
             vec![format!("{arg}: No such file or directory")],
             1,
@@ -356,7 +356,7 @@ fn read_lines(state: &GameState, arg: &str) -> Result<Vec<String>, ShellOutput> 
             is_binary,
             ..
         } => {
-            if root && !state.is_root {
+            if root && !state.pentest().is_root {
                 Err(ShellOutput::code(
                     vec![format!("{arg}: Permission denied")],
                     1,
@@ -452,8 +452,8 @@ fn file_cmd(state: &GameState, args: &[String]) -> ShellOutput {
     let Some(path) = args.first() else {
         return ShellOutput::code(vec![String::from("usage: file FILE")], 2);
     };
-    let comps = filesystem::normalize(&state.cwd, path);
-    match filesystem::read_file(&state.target.filesystem, &comps) {
+    let comps = filesystem::normalize(&state.core.cwd, path);
+    match filesystem::read_file(&state.pentest().target.filesystem, &comps) {
         ReadOutcome::NotFound => ShellOutput::code(
             vec![format!("{path}: cannot open (No such file or directory)")],
             1,
@@ -550,6 +550,7 @@ mod tests {
             language: Language::En,
             intro: vec![],
             stages: crate::model::campaign::default_stages(),
+            domain: None,
             features: Default::default(),
             theme: Theme::default(),
             easter_eggs: vec![],
@@ -599,7 +600,7 @@ mod tests {
     fn expand_vars_resuelve_derivadas_campaign_y_exit() {
         let mut g = state();
         g.reach_phase(Phase::Post);
-        g.is_root = true;
+        g.pentest_mut().is_root = true;
         g.core.last_exit = 3;
         assert_eq!(expand_vars(&g, "$USER"), "root");
         assert_eq!(expand_vars(&g, "${APP_SECRET}"), "s3cr3t");

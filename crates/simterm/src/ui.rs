@@ -66,7 +66,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
-    let (status_text, status_color) = match app.game.outcome {
+    let (status_text, status_color) = match app.game.core.outcome {
         Some(GameOutcome::Victory) => (" [ OPERACIÓN CONCLUIDA ] ", AMBER_HI),
         Some(GameOutcome::Defeat) => (" [ ENLACE CORTADO ] ", BRICK),
         None => (" [ EN CURSO ] ", AMBER_DIM),
@@ -135,7 +135,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
-    let t = &app.game.target;
+    let t = &app.game.pentest().target;
     let mut lines = vec![
         kv("host", &t.hostname),
         kv("ip", &t.ip),
@@ -147,7 +147,7 @@ fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
     ];
     let mut any = false;
     for s in &t.services {
-        if !app.game.discovered_ports.contains(&s.port) {
+        if !app.game.pentest().discovered_ports.contains(&s.port) {
             continue;
         }
         any = true;
@@ -186,7 +186,7 @@ fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
     match app.game.time_remaining() {
         Some(rem) => {
             // Ventana operativa: muestra ticks usados/restantes. No es tiempo real.
-            let limit = app.game.time_limit.unwrap_or(0);
+            let limit = app.game.pentest().time_limit.unwrap_or(0);
             let low = limit > 0 && rem * 4 <= limit;
             let style = if low {
                 Style::default().fg(BRICK).add_modifier(Modifier::BOLD)
@@ -198,26 +198,26 @@ fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
                 style,
             )));
             lines.push(Line::from(Span::styled(
-                format!("tiempo  t={}/{}", app.game.clock, limit),
+                format!("tiempo  t={}/{}", app.game.core.clock, limit),
                 style,
             )));
         }
         None => {
             lines.push(Line::from(Span::styled(
-                format!("tiempo  t={} sin ventana", app.game.clock),
+                format!("tiempo  t={} sin ventana", app.game.core.clock),
                 Style::default().fg(AMBER_DIM),
             )));
         }
     }
     lines.push(Line::from(Span::styled(
-        format!("hallazgos: {}", app.game.intel.len()),
+        format!("hallazgos: {}", app.game.pentest().intel.len()),
         Style::default().fg(AMBER_DIM),
     )));
 
     // Defensa activa (solo en hosts reactivos): muestra la etapa de respuesta
     // del equipo azul. En rojo en cuanto se ha disparado alguna contramedida.
-    if app.game.reactive {
-        let stage = app.game.defense_stage;
+    if app.game.pentest().reactive {
+        let stage = app.game.pentest().defense_stage;
         let (txt, style) = match stage {
             0 => (
                 String::from("defensa ACTIVA (en espera)"),
@@ -292,11 +292,11 @@ fn collect_gauges(app: &App) -> Vec<GaugeSpec> {
     let mut gauges = Vec::new();
 
     if g.campaign.uses_trace() {
-        let limit = g.detection_limit;
+        let limit = g.pentest().detection_limit;
         gauges.push(GaugeSpec {
             title: String::from(" traza "),
-            ratio: g.detection.ratio(limit) as f64,
-            label: format!("{:.0} / {:.0}", g.detection.value, limit),
+            ratio: g.pentest().detection.ratio(limit) as f64,
+            label: format!("{:.0} / {:.0}", g.pentest().detection.value, limit),
             kind: GaugeKind::Trace,
         });
     }
@@ -379,7 +379,7 @@ fn draw_console(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Salida previa: cada línea lógica se envuelve a `width` columnas.
-    for raw in &app.game.logs {
+    for raw in &app.game.core.logs {
         let style = log_style(raw);
         for piece in wrap_str(raw, width) {
             lines.push(Line::from(Span::styled(piece, style)));

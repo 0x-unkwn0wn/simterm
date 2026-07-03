@@ -1,21 +1,47 @@
 //! `CoreState`: el estado de runtime **domain-agnóstico**.
 //!
-//! Es el núcleo naciente de la separación `GameState` → núcleo + estado de
-//! dominio (sub-paso 5 de la generalización). `GameState` lo embebe como
-//! `core` y va migrando aquí, de forma incremental y sin romper nada, los campos
-//! que no son de ningún dominio concreto. De momento alberga la **sesión de
-//! shell** (overrides de `export`, `$?`) y los **medidores de campaña**: piezas
-//! puramente genéricas que cualquier dominio (pentest, forense, satélite) usa
-//! igual. El resto del estado sigue en `GameState` y migra en pasadas sucesivas;
-//! los campos específicos de intrusión acabarán formando un `DomainState`.
+//! Es el núcleo de la separación `GameState` → núcleo + estado de dominio (Fase 2
+//! de la generalización). `GameState` lo embebe como `core` y va migrando aquí,
+//! de forma incremental y sin romper nada, los campos que no son de ningún
+//! dominio concreto. Ya alberga: la **sesión** (logs, `running`, `clock`,
+//! `outcome`, el cursor de etapa `stage`, el `cwd` del VFS), la **sesión de
+//! shell** (overrides de `export`, `$?`), los **medidores de campaña** y el
+//! **bookkeeping persistente**. Lo que queda en `GameState` es específico de
+//! intrusión y acabará formando un `PentestState` (Fase C).
 
 use std::collections::BTreeMap;
 
 use crate::model::meter::MeterDef;
 use crate::runtime::meter::Meter;
 
+/// Desenlace de la campaña. Neutro: cualquier dominio gana o pierde igual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameOutcome {
+    Victory,
+    Defeat,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CoreState {
+    // ----- Sesión (neutra, común a todos los dominios) -----
+    /// Registro de líneas de la consola/telemetría del nivel. Lo alimenta
+    /// `GameState::log`. Se limpia en las transiciones de nivel.
+    pub logs: Vec<String>,
+    /// ¿Sigue viva la sesión? El frontend sale de su bucle cuando pasa a `false`.
+    /// Arranca en `true` (ver [`CoreState::new`]).
+    pub running: bool,
+    /// Reloj del nivel activo (ticks). Se reinicia en cada nivel.
+    pub clock: u32,
+    /// Desenlace de la *campaña*: solo se fija al perder o al completarla. `None`
+    /// mientras la partida sigue en curso.
+    pub outcome: Option<GameOutcome>,
+    /// Cursor de etapa de progresión: índice en `Campaign.stages`. Neutro; cada
+    /// dominio le da su lectura (el pentest, como `Phase`). Se reinicia por nivel.
+    pub stage: usize,
+    /// Directorio de trabajo actual en el VFS (componentes de ruta; vacío = "/").
+    /// Es navegación genérica del terminal, común a cualquier dominio con VFS.
+    pub cwd: Vec<String>,
+
     /// Definición de los medidores de campaña del nivel activo (de la misión).
     pub meter_defs: Vec<MeterDef>,
     /// Valores vivos de esos medidores, por id. Vacío si el nivel no declara
@@ -47,6 +73,10 @@ pub struct CoreState {
 
 impl CoreState {
     pub fn new() -> Self {
-        Self::default()
+        CoreState {
+            // La sesión arranca viva; `Default` daría `false` (bool por defecto).
+            running: true,
+            ..Self::default()
+        }
     }
 }

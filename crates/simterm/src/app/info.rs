@@ -339,7 +339,7 @@ impl App {
 
     pub(super) fn cmd_target(&mut self) {
         let lang = self.game.campaign.language;
-        let t = &self.game.target;
+        let t = &self.game.pentest().target;
         let mut lines = vec![
             String::from("--- NODO OBJETIVO ---"),
             format!("hostname : {}", t.hostname),
@@ -350,7 +350,7 @@ impl App {
         let discovered: Vec<_> = t
             .services
             .iter()
-            .filter(|s| self.game.discovered_ports.contains(&s.port))
+            .filter(|s| self.game.pentest().discovered_ports.contains(&s.port))
             .cloned()
             .collect();
 
@@ -380,7 +380,7 @@ impl App {
     }
 
     pub(super) fn cmd_intel(&mut self) {
-        if self.game.intel.is_empty() {
+        if self.game.pentest().intel.is_empty() {
             self.game.log(String::from(
                 "Sin hallazgos todavía. Descubre servicios ('nmap') y enuméralos.",
             ));
@@ -392,6 +392,7 @@ impl App {
         // Clonamos las líneas para no chocar con el préstamo mutable del log.
         let rows: Vec<String> = self
             .game
+            .pentest()
             .intel
             .iter()
             .map(|f| {
@@ -413,8 +414,9 @@ impl App {
 
     pub(super) fn cmd_status(&mut self) {
         let g = &self.game;
-        let total = g.intel.len();
+        let total = g.pentest().intel.len();
         let verified = g
+            .pentest()
             .intel
             .iter()
             .filter(|f| {
@@ -424,7 +426,7 @@ impl App {
                 )
             })
             .count();
-        let outcome = match g.outcome {
+        let outcome = match g.core.outcome {
             Some(GameOutcome::Victory) => "VICTORIA",
             Some(GameOutcome::Defeat) => "DERROTA",
             None => "en curso",
@@ -432,11 +434,11 @@ impl App {
         let time_line = match g.time_remaining() {
             Some(rem) => format!(
                 "tiempo op.    : t={}/{}  (quedan {})",
-                g.clock,
-                g.time_limit.unwrap_or(0),
+                g.core.clock,
+                g.pentest().time_limit.unwrap_or(0),
                 rem
             ),
-            None => format!("tiempo op.    : t={}  (sin ventana)", g.clock),
+            None => format!("tiempo op.    : t={}  (sin ventana)", g.core.clock),
         };
         let lines = vec![
             String::from("--- ESTADO ---"),
@@ -455,7 +457,7 @@ impl App {
                 "shell         : {}   cwd {}",
                 if !g.has_foothold() {
                     "sin acceso"
-                } else if g.is_root {
+                } else if g.pentest().is_root {
                     "root"
                 } else {
                     "usuario"
@@ -465,7 +467,7 @@ impl App {
             time_line,
             format!(
                 "detección     : {:.0}/{:.0}  (ruido total {:.0})",
-                g.detection.value, g.detection_limit, g.detection.total
+                g.pentest().detection.value, g.pentest().detection_limit, g.pentest().detection.total
             ),
             format!("hallazgos     : {total} ({verified} con veredicto de verificación)"),
             format!("campaña       : {outcome}"),
@@ -495,14 +497,14 @@ impl App {
 
     pub(super) fn cmd_achievements(&mut self) {
         let lang = self.game.campaign.language;
-        let unlocked = self.game.achievements.len() + self.game.core.campaign_achievements.len();
+        let unlocked = self.game.pentest().achievements.len() + self.game.core.campaign_achievements.len();
         let total = simterm_engine::ACHIEVEMENTS.len() + self.game.campaign.achievements.len();
         self.game
             .log(format!("--- LOGROS ({unlocked}/{total}) ---"));
 
         self.game.log(String::from("[motor]"));
         for id in simterm_engine::ACHIEVEMENTS {
-            let mark = if self.game.achievements.contains(id) {
+            let mark = if self.game.pentest().achievements.contains(id) {
                 "[x]"
             } else {
                 "[ ]"

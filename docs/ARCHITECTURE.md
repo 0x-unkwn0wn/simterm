@@ -65,10 +65,14 @@ Important model files:
 
 Important runtime files:
 
-- `state.rs` - the `GameState`: mission/campaign state and progression.
-- `core.rs` - `CoreState`: the domain-agnostic runtime nucleus (shell session,
-  campaign meters, persistent bookkeeping) that `GameState` is being factored
-  into.
+- `state.rs` - the `GameState`, now a thin **coordinator** of three parts:
+  `campaign` (definition), `core: CoreState` (neutral runtime), and
+  `domain: DomainState` (the active domain's runtime). Also defines
+  `PentestState` (the pentest domain state) and the `DomainState` enum.
+- `core.rs` - `CoreState`: the domain-agnostic runtime nucleus — session (logs,
+  `running`, `clock`, `outcome`, the generic stage cursor, the VFS `cwd`), shell
+  session (`export`/`$?`), campaign meters, persistent bookkeeping, and the
+  level/ending flow. `GameOutcome` lives here (neutral).
 - `meter.rs` - the generic `Meter` primitive (a value with a floor at 0; the
   pentest trace is one meter).
 - `sysemu.rs` - emulated POSIX system commands (`uname`, `ps`, `netstat`, `env`,
@@ -80,8 +84,25 @@ Important runtime files:
 
 The core is domain-agnostic: generic stages, meters, a world node with a
 filesystem, declarative commands, and terminal emulation. A **domain** gives that
-core meaning by adding its own verbs, state, and mechanics. Pentesting is the one
-built-in domain, isolated under `domains/pentest/`:
+core meaning by adding its own verbs, state, and mechanics.
+
+Domains are a **closed, in-tree set**, not a plugin system. Each campaign selects
+one via its [`domain`](CAMPAIGN_FORMAT.md#domain) field (`DomainKind`, inferred
+from `stages` when omitted). The active domain's runtime is stored in an enum and
+reached through a trait:
+
+- `DomainState` (in `runtime/state.rs`) - the closed enum of domain runtimes.
+  Today it has one variant, `Pentest(PentestState)`; adding a domain (e.g.
+  `Sysadmin(SysadminState)`) is a new variant, a new `impl Domain`, and a new arm
+  in the `pentest()`/`active()` accessors — the compiler's exhaustive match keeps
+  every domain covered.
+- `Domain` (the trait, in `domains/mod.rs`) - the contract the core calls without
+  knowing the concrete domain (e.g. `prompt`, `on_tick`). `PentestState` is its
+  first implementation; more of the pentest lifecycle migrates onto it
+  incrementally.
+
+Pentesting is the one built-in domain with Rust mechanics, isolated under
+`domains/pentest/`:
 
 - `actions.rs` - the pentest verbs: recon, enumeration, research, exploit, login,
   privesc, VFS, cleanup, netmap, pivot, completion, and declarative/terminal
@@ -92,10 +113,12 @@ built-in domain, isolated under `domains/pentest/`:
 - `stage.rs` - the kill-chain `Phase`, a typed view over the generic stage cursor.
 - `achievements.rs` - the built-in pentest achievements.
 
-A "light" domain (forensics, a satellite console) needs no Rust at all: it is
-data — its own `stages`, `meters` with win/lose outcomes, generic hosts, and
-declarative commands — with the pentest mechanics switched off via `features`.
-See [`examples/demo_orbita`](../examples/demo_orbita/campaign.ron).
+A `Bare` (data-only) domain needs no Rust at all: it is data — its own `stages`,
+`meters` with win/lose outcomes, generic hosts, and declarative commands. See
+[`examples/demo_orbita`](../examples/demo_orbita/campaign.ron). (Bare campaigns
+currently still lean on the pentest world/VFS scaffolding; extracting that neutral
+`WorldNode`/VFS into the core, so `DomainState` gains a stateless `Bare` variant,
+is the next step.)
 
 ## Campaign Loading
 

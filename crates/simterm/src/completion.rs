@@ -138,8 +138,8 @@ fn path_candidates(state: &GameState, frag: &str) -> Vec<String> {
         Some(i) => (&frag[..=i], &frag[i + 1..]),
         None => ("", frag),
     };
-    let comps = filesystem::normalize(&state.cwd, base);
-    let children = match filesystem::dir_children(&state.target.filesystem, &comps) {
+    let comps = filesystem::normalize(&state.core.cwd, base);
+    let children = match filesystem::dir_children(&state.pentest().target.filesystem, &comps) {
         Some(c) => c,
         None => return Vec::new(),
     };
@@ -155,6 +155,7 @@ fn path_candidates(state: &GameState, frag: &str) -> Vec<String> {
 
 fn port_candidates(state: &GameState, frag: &str) -> Vec<String> {
     state
+        .pentest()
         .discovered_ports
         .iter()
         .map(|p| p.to_string())
@@ -164,6 +165,7 @@ fn port_candidates(state: &GameState, frag: &str) -> Vec<String> {
 
 fn id_candidates(state: &GameState, frag: &str) -> Vec<String> {
     state
+        .pentest()
         .intel
         .iter()
         .map(|f| f.public_id.to_string())

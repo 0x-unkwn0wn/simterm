@@ -228,7 +228,7 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         // Ctrl-C siempre sale.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.game.running = false;
+            self.game.core.running = false;
             return;
         }
 
@@ -454,7 +454,7 @@ impl App {
 
         // Capturamos estado previo para detectar transiciones de nivel/partida.
         let prev_level = self.game.level_index;
-        let prev_outcome = self.game.outcome;
+        let prev_outcome = self.game.core.outcome;
 
         self.dispatch(cmd);
 
@@ -468,8 +468,8 @@ impl App {
     /// la campaña (el estado ya ha cambiado; el efecto es solo visual). El texto
     /// de cada overlay procede de la campaña (theme).
     fn trigger_transition(&mut self, prev_level: usize, prev_outcome: Option<GameOutcome>) {
-        if self.game.outcome != prev_outcome {
-            match self.game.outcome {
+        if self.game.core.outcome != prev_outcome {
+            match self.game.core.outcome {
                 // Última operación cerrada: debrief final y, tras él, el rollo
                 // de créditos cinemático que cierra la campaña.
                 Some(GameOutcome::Victory) => {
@@ -509,7 +509,7 @@ impl App {
         match cmd {
             Command::Empty => {}
             Command::Clear => {
-                self.game.logs.clear();
+                self.game.core.logs.clear();
                 self.follow = true;
             }
             Command::Help { all } => self.cmd_help(all),
@@ -551,7 +551,7 @@ impl App {
             Command::Status => self.cmd_status(),
             Command::Logs => self.cmd_logs(),
             Command::Achievements => self.cmd_achievements(),
-            Command::Quit => self.game.running = false,
+            Command::Quit => self.game.core.running = false,
             Command::Shell { verb, args } => self.cmd_shell(verb, args),
             Command::Echo(text) => {
                 // `echo` expande variables de entorno ($VAR, ${VAR}, $?).
