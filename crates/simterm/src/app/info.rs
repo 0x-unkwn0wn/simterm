@@ -11,43 +11,62 @@ impl App {
     /// vuelca además la referencia completa de comandos.
     pub(super) fn cmd_help(&mut self, all: bool) {
         let lang = self.game.campaign.language;
-        let phase = self.game.phase();
-        let phase_label = self.game.stage_label().to_string();
+        // Toggle de dominio: ¿mostrar la ayuda de la kill chain? Lo decide
+        // `features.kill_chain` (default heurístico: pentest si usa las etapas por
+        // defecto). Un dominio propio muestra sus comandos, no la kill chain.
+        let kill_chain = self.game.campaign.kill_chain();
+        let stage_label = self.game.stage_label().to_string();
 
         let mut lines: Vec<String> = Vec::new();
 
-        // Cabecera + kill chain (siempre).
+        // Cabecera + etapas (data-driven: sirve a cualquier dominio).
         lines.push(match lang {
-            Language::Es => format!("--- AYUDA (fase actual: {phase_label}) ---"),
-            Language::En => format!("--- HELP (current phase: {phase_label}) ---"),
+            Language::Es => format!("--- AYUDA (etapa actual: {stage_label}) ---"),
+            Language::En => format!("--- HELP (current stage: {stage_label}) ---"),
         });
+        let stages = self.game.campaign.stages.join(" -> ");
         lines.push(match lang {
-            Language::Es => String::from(
-                "Kill chain: RECON -> ENUM -> EXPLOIT -> POST. Cada fase habilita acciones.",
-            ),
-            Language::En => String::from(
-                "Kill chain: RECON -> ENUM -> EXPLOIT -> POST. Each phase unlocks actions.",
-            ),
+            Language::Es => format!("Etapas: {stages}. Cada etapa habilita acciones."),
+            Language::En => format!("Stages: {stages}. Each stage unlocks actions."),
         });
 
-        // Bloques por fase: en modo compacto, solo el de la fase en curso.
-        let show = |p: Phase| all || phase == p;
-        if show(Phase::Recon) {
-            lines.extend(Self::help_recon(lang));
-        }
-        if show(Phase::Enum) {
-            lines.extend(Self::help_enum(lang));
-        }
-        if show(Phase::Exploit) {
-            lines.extend(Self::help_exploit(lang));
-        }
-        if show(Phase::Post) {
-            lines.extend(Self::help_post(lang));
+        if kill_chain {
+            // Dominio pentest: bloques por fase de la kill chain (en compacto,
+            // solo la fase en curso).
+            let phase = self.game.phase();
+            let show = |p: Phase| all || phase == p;
+            if show(Phase::Recon) {
+                lines.extend(Self::help_recon(lang));
+            }
+            if show(Phase::Enum) {
+                lines.extend(Self::help_enum(lang));
+            }
+            if show(Phase::Exploit) {
+                lines.extend(Self::help_exploit(lang));
+            }
+            if show(Phase::Post) {
+                lines.extend(Self::help_post(lang));
+            }
+        } else if !all {
+            // Dominio propio: sus comandos (declarativos + terminal). En 'help all'
+            // se listan más abajo, así que aquí solo en modo compacto.
+            lines.extend(self.help_campaign(lang));
         }
 
-        // GENERAL y pistas: siempre.
+        // GENERAL siempre; las pistas específicas de pentest, solo en su dominio.
         lines.extend(Self::help_general(lang));
-        lines.extend(Self::help_tips(lang));
+        if kill_chain {
+            lines.extend(Self::help_tips(lang));
+        } else {
+            lines.push(match lang {
+                Language::Es => String::from(
+                    "Teclas: Tab autocompleta · ↑/↓ historial · RePág/AvPág o rueda scroll · Esc limpia línea.",
+                ),
+                Language::En => String::from(
+                    "Keys: Tab autocomplete · Up/Down history · PgUp/PgDn or wheel scroll · Esc clears line.",
+                ),
+            });
+        }
 
         if !all {
             lines.push(match lang {
@@ -74,8 +93,22 @@ impl App {
         });
         lines.extend(crate::registry::reference_lines());
 
-        // Comandos declarativos definidos por la campaña (no ocultos). Su metadata
-        // vive en los datos de la campaña, no en el registro de built-ins.
+        // Comandos definidos por la campaña (declarativos + terminal autorados).
+        lines.extend(self.help_campaign(lang));
+
+        for l in lines {
+            self.game.log(l);
+        }
+    }
+
+    // ---- Bloques de ayuda por fase (líneas curadas; se muestran según fase) ----
+
+    /// Comandos definidos por la campaña (declarativos + terminal autorados, no
+    /// ocultos), para la ayuda. Su metadata vive en los datos de la campaña, no
+    /// en el registro de built-ins del frontend. Sirve a cualquier dominio.
+    fn help_campaign(&self, lang: Language) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+
         let campaign_cmds: Vec<String> = self
             .game
             .campaign
@@ -98,7 +131,6 @@ impl App {
             lines.extend(campaign_cmds);
         }
 
-        // Comandos de terminal autorados (no ocultos): sabor de shell de la campaña.
         let terminal_cmds: Vec<String> = self
             .game
             .campaign
@@ -115,12 +147,8 @@ impl App {
             lines.extend(terminal_cmds);
         }
 
-        for l in lines {
-            self.game.log(l);
-        }
+        lines
     }
-
-    // ---- Bloques de ayuda por fase (líneas curadas; se muestran según fase) ----
 
     fn help_recon(lang: Language) -> Vec<String> {
         let src: &[&str] = match lang {

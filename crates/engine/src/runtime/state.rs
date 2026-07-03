@@ -1007,13 +1007,18 @@ impl GameState {
         for line in m.briefing {
             self.log(line);
         }
-        let hint = match &m.entry {
-            EntryVector::Active => text.entry_hint_active(),
-            EntryVector::Cold { .. } => text.entry_hint_cold(),
-            EntryVector::Passive => text.entry_hint_passive(),
-            EntryVector::Pivot { .. } => text.entry_hint_pivot(),
-        };
-        self.log(text.trace_hint(limit, hint));
+        // Los hints de arranque (vector de entrada + traza) son mecánica de la
+        // kill chain: se rigen por el toggle `features.kill_chain` (default
+        // heurístico). Un dominio propio guía con su briefing y sus comandos.
+        if self.campaign.kill_chain() {
+            let hint = match &m.entry {
+                EntryVector::Active => text.entry_hint_active(),
+                EntryVector::Cold { .. } => text.entry_hint_cold(),
+                EntryVector::Passive => text.entry_hint_passive(),
+                EntryVector::Pivot { .. } => text.entry_hint_pivot(),
+            };
+            self.log(text.trace_hint(limit, hint));
+        }
     }
 
     /// Foothold conseguido: pasa a fase POST. El nivel se completa con privesc.
@@ -1028,22 +1033,39 @@ impl GameState {
         if self.outcome.is_some() || self.core.awaiting_choice {
             return;
         }
-        self.log(String::from(self.text().level_completed()));
+        // El texto de cierre y el resumen dependen del dominio: la exfiltración y
+        // la "traza"/sigilo son mecánica pentest.
+        let kill_chain = self.campaign.kill_chain();
+        let uses_trace = self.campaign.uses_trace();
+
+        let completed_msg = if kill_chain {
+            self.text().level_completed()
+        } else {
+            self.text().level_completed_neutral()
+        };
+        self.log(String::from(completed_msg));
         let completed_mission_id = self.campaign.missions[self.level_index].id.clone();
         self.unlock_campaign_complete_mission(&completed_mission_id);
 
-        // Resumen del nivel: grado de sigilo según la traza dejada (del tema).
-        let ratio = self.detection.ratio(self.detection_limit);
-        let stealth_unlocked =
-            ratio < 0.25 && self.unlock_achievement(AchievementId::StealthOperation);
-        let g = self.campaign.theme.grade(ratio).to_string();
-        self.core.last_summary = Some(self.text().level_summary(
-            self.level_number(),
-            &g,
-            self.detection.value,
-            self.detection_limit,
-            self.clock,
-        ));
+        // Resumen del nivel: con traza, grado de sigilo (del tema) y el logro de
+        // operación limpia; sin traza, un cierre neutral.
+        let stealth_unlocked = if uses_trace {
+            let ratio = self.detection.ratio(self.detection_limit);
+            let unlocked = ratio < 0.25 && self.unlock_achievement(AchievementId::StealthOperation);
+            let g = self.campaign.theme.grade(ratio).to_string();
+            self.core.last_summary = Some(self.text().level_summary(
+                self.level_number(),
+                &g,
+                self.detection.value,
+                self.detection_limit,
+                self.clock,
+            ));
+            unlocked
+        } else {
+            self.core.last_summary =
+                Some(self.text().level_summary_neutral(self.level_number(), self.clock));
+            false
+        };
         self.core.campaign_clock += self.clock;
 
         // Debrief (lore de cierre) de la misión recién superada.

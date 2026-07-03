@@ -1,0 +1,243 @@
+// ============================================================================
+//  CAMPAÑA DEMO — "ORBITA-7" (NO es de hacking)
+// ----------------------------------------------------------------------------
+//  Demuestra que el motor generalizado sirve para OTROS dominios usando SOLO
+//  datos: etapas propias (no la kill chain), medidores con desenlace
+//  (batería que se agota = derrota; enlace al 100% = victoria), un host
+//  genérico SIN services/vulnerabilities, y comandos declarativos que guían
+//  la progresión (ReachStage) y mueven los medidores (AddMeter).
+//
+//  Ejecútala con:
+//      cargo run -p simterm -- --campaign ./examples/demo_orbita
+//
+//  Reto: reactiva la sonda y transmite antes de quedarte sin batería.
+//  Los paneles solares ('desplegar') recargan: sin ellos NO llegas.
+// ============================================================================
+Campaign(
+    name: "ORBITA-7",
+    language: es,
+
+    // Etapas PROPIAS del dominio (no RECON/ENUM/EXPLOIT/POST).
+    stages: ["ARRANQUE", "DIAGNÓSTICO", "ORIENTACIÓN", "ENLACE"],
+
+    intro: [
+        "Red de Espacio Profundo — Estación de control.",
+        "La sonda ORBITA-7 lleva 9 horas en silencio, girando sin control a 3.2 UA.",
+        "Tienes una ventana mínima de batería para revivirla. Teclea los comandos.",
+    ],
+
+    theme: (
+        app_title: "ORBITA-7",
+        boot_header: "D S N // O R B I T A - 7",
+        boot_lines: [
+            "Enlace con la antena de 70 m establecido.",
+            "Telemetría de la sonda: SIN SEÑAL.",
+        ],
+        overlay_title: " ORBITA-7 ",
+        alert_title: " ALERTA ",
+        operator_prompt: "control@dsn:~$ ",
+        stealth_grades: ["NOMINAL", "ESTABLE", "DEGRADADO", "CRÍTICO"],
+        defense_messages: ["", "", ""],
+        aborted_lines: [
+            "La batería de la sonda ha llegado a cero.",
+            "ORBITA-7 se ha apagado para siempre. Fin del contacto.",
+        ],
+        credits: [
+            "CONTACTO RESTABLECIDO",
+            "",
+            "Campaña demo del motor simterm-engine (dominio no-hacking).",
+            "Prueba de que meters + stages + hosts genéricos funcionan solo con datos.",
+        ],
+    ),
+
+    easter_eggs: [
+        (triggers: ["hal"], lines: ["No puedo hacer eso, Dave."]),
+        (triggers: ["houston"], lines: ["Houston, aquí ORBITA-7... aún no, pero pronto."]),
+        (triggers: ["date"], lines: ["Reloj de misión: t={clock} (tiempo de la estación)."]),
+    ],
+
+    fortunes: [
+        "En el espacio nadie oye tu batería agotarse.",
+        "Orienta la antena antes de gritar al vacío.",
+        "El Sol siempre paga: despliega los paneles.",
+    ],
+
+    signals: ["APOGEO", "PERIGEO", "AFELIO", "DOWNLINK"],
+
+    achievements: [
+        (
+            id: "contacto",
+            title: "Contacto restablecido",
+            description: "Restablece el enlace con ORBITA-7.",
+            trigger: CompleteMission("orbita-7"),
+        ),
+        (
+            id: "mision-cumplida",
+            title: "Misión cumplida",
+            description: "Cierra la operación de rescate.",
+            trigger: CampaignComplete,
+        ),
+    ],
+
+    // Comandos declarativos: TODA la mecánica del dominio vive aquí, en datos.
+    commands: [
+        (
+            triggers: ["encender", "power", "boot"],
+            conditions: [FlagNotSet("encendido")],
+            lines: [
+                "Enviando secuencia de arranque (retardo de señal: 26 min)...",
+                "Ordenador de a bordo: EN LÍNEA. Giroscopios: activos.",
+            ],
+            effects: [
+                SetFlag("encendido"),
+                AddMeter("bateria", -1.0),
+                ReachStage("DIAGNÓSTICO"),
+                AddLog("Consejo: despliega los paneles ('desplegar') para no quedarte sin batería."),
+            ],
+        ),
+        (
+            triggers: ["desplegar", "solar", "paneles"],
+            conditions: [FlagSet("encendido"), FlagNotSet("solar")],
+            lines: ["Desplegando paneles solares... orientación al Sol conseguida."],
+            effects: [
+                SetFlag("solar"),
+                AddMeter("bateria", 8.0),
+                AddLog("Carga solar en curso: +8 de batería."),
+            ],
+        ),
+        (
+            triggers: ["diagnostico", "diag"],
+            conditions: [FlagSet("encendido"), FlagNotSet("diagnosticado")],
+            lines: [
+                "Diagnóstico de subsistemas:",
+                "  - Propulsión ....... OK",
+                "  - Antena de alta ... DESALINEADA",
+                "  - Baterías ......... CRÍTICAS",
+            ],
+            effects: [
+                SetFlag("diagnosticado"),
+                AddMeter("bateria", -2.0),
+                ReachStage("ORIENTACIÓN"),
+            ],
+        ),
+        (
+            triggers: ["orientar", "align"],
+            conditions: [FlagSet("diagnosticado"), FlagNotSet("orientado")],
+            lines: ["Reorientando la antena de alta ganancia hacia la Tierra..."],
+            effects: [
+                SetFlag("orientado"),
+                AddMeter("bateria", -3.0),
+                AddMeter("enlace", 40.0),
+                ReachStage("ENLACE"),
+                AddLog("Antena alineada. Enlace parcial: transmite para cerrarlo."),
+            ],
+        ),
+        (
+            triggers: ["transmitir", "transmit"],
+            conditions: [FlagSet("orientado")],
+            lines: [
+                "Iniciando downlink... handshake con la Red de Espacio Profundo...",
+            ],
+            effects: [
+                AddMeter("bateria", -4.0),
+                AddMeter("enlace", 60.0),
+            ],
+        ),
+    ],
+
+    env: {
+        "MISSION": "ORBITA-7",
+        "DSN_STATION": "DSS-14 Goldstone",
+    },
+
+    // Comando de terminal autorado (presentacional): un panel de telemetría.
+    terminal: [
+        (
+            triggers: ["telemetria", "panel"],
+            output: [
+                "== TELEMETRÍA ORBITA-7 ==================================",
+                " estación : $DSN_STATION",
+                " misión   : $MISSION      reloj t={clock}",
+                " distancia: 3.2 UA        retardo señal: 26m 40s",
+                "=========================================================",
+            ],
+            exit: 0,
+        ),
+    ],
+
+    missions: [
+        Mission(
+            id: "orbita-7",
+            name: "RESCATE DE ORBITA-7",
+            briefing: [
+                "La sonda gira sin control y con la batería casi vacía.",
+                "Secuencia: 'encender' -> 'diagnostico' -> 'orientar' -> 'transmitir'.",
+                "VIGILA LA BATERÍA: si llega a 0, la sonda se apaga (derrota).",
+                "Recárgala con 'desplegar' (paneles solares). Sin recargar NO llegas.",
+                "Usa 'telemetria' para ver el panel de estado, y 'ls'/'cat' para la bitácora.",
+            ],
+            detection_limit: 999.0,
+            objective: None,
+            entry: Active,
+            debrief: [
+                "Downlink estable. ORBITA-7 vuelve a responder.",
+                "Operación de rescate completada.",
+            ],
+            endings: [
+                (title: "Ceder el control a la Red de Espacio Profundo", lines: [
+                    "Sueltas el mando. La sonda transmite su primer paquete en 9 horas.",
+                    "La sala estalla en aplausos.",
+                ]),
+                (title: "Mantener ORBITA-7 en modo manual", lines: [
+                    "Decides pilotarla tú un rato más. La noche será larga, pero es tuya.",
+                ]),
+            ],
+            // Medidores del dominio: batería (se agota = derrota) y enlace (100% = victoria).
+            meters: [
+                (
+                    id: "bateria",
+                    label: Some("batería"),
+                    start: 10.0,
+                    limit: 0.0,
+                    trigger: AtMost,
+                    on_limit: Fail,
+                ),
+                (
+                    id: "enlace",
+                    label: Some("enlace"),
+                    start: 0.0,
+                    limit: 100.0,
+                    trigger: AtLeast,
+                    on_limit: Win,
+                ),
+            ],
+            // Nodo GENÉRICO: nombre + plataforma + ficheros explorables, SIN
+            // services ni vulnerabilities. El VFS es libre (dominio no-pentest):
+            // 'ls'/'cat' funcionan sin "shell" gracias a features.shell_for_vfs.
+            target: (
+                hostname: "orbita-7",
+                ip: "DSN / 3.2 UA",
+                os: "RTOS-9 (sim)",
+                filesystem: [
+                    File(
+                        name: "bitacora.log",
+                        content: [
+                            "T-09:12  Pérdida de contacto tras maniobra de corrección.",
+                            "T-00:04  Batería en reserva. Modo supervivencia.",
+                            "NOTA: los paneles solares recargan; oriéntalos al Sol.",
+                        ],
+                    ),
+                    Dir(name: "manual", children: [
+                        File(
+                            name: "checklist.txt",
+                            content: [
+                                "1. encender   2. desplegar (paneles)",
+                                "3. diagnostico  4. orientar  5. transmitir",
+                            ],
+                        ),
+                    ]),
+                ],
+            ),
+        ),
+    ],
+)

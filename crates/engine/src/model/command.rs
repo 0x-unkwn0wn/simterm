@@ -48,6 +48,10 @@ pub enum CommandEffect {
     /// Modifica un medidor de campaña por su `id` (positivo suma, negativo resta)
     /// y evalúa su `on_limit`.
     AddMeter(String, f32),
+    /// Avanza a la etapa nombrada (por su nombre en `Campaign.stages`, sin
+    /// distinguir mayúsculas). Nunca retrocede. Permite que un dominio guíe su
+    /// progresión de etapas solo con datos.
+    ReachStage(String),
     /// Desbloquea un logro de campaña por su `id`.
     UnlockAchievement(String),
     /// Completa la misión actual (equivale a lograr el objetivo). Combínalo con

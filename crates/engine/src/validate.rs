@@ -473,6 +473,17 @@ pub fn validate_campaign(campaign: &Campaign, reserved_verbs: &[&str]) -> Valida
                     );
                 }
             }
+            if let CommandEffect::ReachStage(name) = e {
+                if !campaign.stages.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+                    report.error(
+                        &loc,
+                        format!(
+                            "ReachStage('{}') no coincide con ninguna etapa declarada de la campaña",
+                            name
+                        ),
+                    );
+                }
+            }
         }
 
         for c in &cmd.conditions {
@@ -686,6 +697,7 @@ mod tests {
             language: Language::Es,
             intro: vec![],
             stages: crate::model::campaign::default_stages(),
+            features: Default::default(),
             theme: Theme::default(),
             easter_eggs: vec![],
             fortunes: vec![],

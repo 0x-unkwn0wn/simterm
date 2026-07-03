@@ -34,7 +34,7 @@ pub mod validate;
 
 // --- Re-exports de conveniencia para los frontends ---
 
-pub use model::campaign::{Campaign, CampaignAchievement, CampaignAchievementTrigger};
+pub use model::campaign::{Campaign, CampaignAchievement, CampaignAchievementTrigger, Features};
 pub use model::command::{CampaignCommand, CommandCondition, CommandEffect};
 pub use model::filesystem::{self, FsNode, Loot};
 pub use model::meter::{MeterDef, MeterTrigger, OnLimit};
@@ -144,5 +144,96 @@ mod loader_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod demo_orbita_tests {
+    //! La campaña demo NO-hacking (ORBITA-7) es jugable SOLO con datos: etapas
+    //! propias, medidores (batería=derrota, enlace=victoria) y comandos
+    //! declarativos que conducen tanto a la victoria como a la derrota. Es la
+    //! prueba de que el motor ya no está atado al dominio de pentesting.
+
+    use crate::{actions, load_campaign, GameOutcome, GameState};
+    use std::path::PathBuf;
+
+    fn demo() -> GameState {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("demo_orbita");
+        GameState::new(load_campaign(path).expect("la campaña demo debe cargar"))
+    }
+
+    #[test]
+    fn ruta_de_victoria_con_paneles_solares() {
+        let mut g = demo();
+        assert_eq!(g.stage_label(), "ARRANQUE");
+        assert_eq!(g.meter("bateria").map(|m| m.value), Some(10.0));
+
+        // El arranque de un dominio propio NO debe filtrar hints de la kill chain.
+        assert!(
+            !g.logs.iter().any(|l| l.contains("nmap") || l.contains("Traza")),
+            "no deben colarse hints pentest en el arranque: {:?}",
+            g.logs
+        );
+
+        assert!(actions::campaign_command(&mut g, "encender"));
+        assert_eq!(g.stage_label(), "DIAGNÓSTICO", "ReachStage avanza la etapa");
+        assert!(actions::campaign_command(&mut g, "desplegar")); // +8 batería
+        assert!(actions::campaign_command(&mut g, "diagnostico"));
+        assert!(actions::campaign_command(&mut g, "orientar"));
+        assert_eq!(g.stage_label(), "ENLACE");
+        assert!(actions::campaign_command(&mut g, "transmitir")); // enlace -> 100
+
+        // Enlace al 100% (on_limit: Win) cierra el nivel; como hay finales, abre
+        // la decisión. Elegir uno cierra la campaña en victoria.
+        assert!(g.core.awaiting_choice, "el enlace completo abre el final");
+        // El cierre es neutral: ni "exfiltrado" ni "traza" (mecánica pentest).
+        assert!(
+            g.logs.iter().any(|l| l.contains("NIVEL COMPLETADO")),
+            "cierre neutral esperado"
+        );
+        assert!(!g.logs.iter().any(|l| l.contains("exfiltrado")));
+        assert!(
+            g.core
+                .last_summary
+                .as_deref()
+                .is_some_and(|s| !s.contains("traza")),
+            "el resumen no debe mencionar traza: {:?}",
+            g.core.last_summary
+        );
+        g.resolve_ending(0);
+        assert_eq!(g.outcome, Some(GameOutcome::Victory));
+    }
+
+    /// El VFS es explorable sin "shell" en un dominio propio (shell_for_vfs
+    /// cae a `false` por defecto al declarar etapas propias).
+    #[test]
+    fn vfs_libre_sin_foothold() {
+        let mut g = demo();
+        assert!(!g.has_foothold(), "el satélite nunca tiene 'foothold' pentest");
+        actions::fs_ls(&mut g, None);
+        actions::fs_cat(&mut g, Some(String::from("/bitacora.log")));
+        assert!(
+            g.logs.iter().any(|l| l.contains("Modo supervivencia")),
+            "cat debe leer el fichero sin exigir shell: {:?}",
+            g.logs
+        );
+    }
+
+    #[test]
+    fn sin_paneles_la_bateria_se_agota() {
+        let mut g = demo();
+        actions::campaign_command(&mut g, "encender"); // 10 -> 9
+        actions::campaign_command(&mut g, "diagnostico"); // 9 -> 7
+        actions::campaign_command(&mut g, "orientar"); // 7 -> 4
+        actions::campaign_command(&mut g, "transmitir"); // 4 -> 0 => Fail
+        assert_eq!(
+            g.outcome,
+            Some(GameOutcome::Defeat),
+            "sin recargar con paneles, la batería se agota y la sonda muere"
+        );
     }
 }

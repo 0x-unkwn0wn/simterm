@@ -91,7 +91,7 @@ fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(AMBER),
         ),
         Span::styled(
-            format!("[fase {}] ", g.stage_label()),
+            format!("[etapa {}] ", g.stage_label()),
             Style::default().fg(AMBER_HI).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -109,13 +109,29 @@ fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    // Indicadores del dominio: la "traza" (si se usa) y/o los medidores de la
+    // campaña (batería, enlace, oxígeno...). Un dominio sin ninguno deja todo el
+    // lateral para los datos del nodo.
+    let gauges = collect_gauges(app);
+    if gauges.is_empty() {
+        draw_target(frame, area, app);
+        return;
+    }
+    let gauge_h = 3u16; // cada indicador: borde + barra + borde
+    let bottom = (gauges.len() as u16 * gauge_h).min(area.height.saturating_sub(3));
     let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Length(5)])
+        .constraints([Constraint::Min(3), Constraint::Length(bottom)])
         .split(area);
 
     draw_target(frame, parts[0], app);
-    draw_detection(frame, parts[1], app);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(gauge_h); gauges.len()])
+        .split(parts[1]);
+    for (spec, row) in gauges.iter().zip(rows.iter()) {
+        draw_gauge(frame, *row, spec);
+    }
 }
 
 fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
@@ -252,26 +268,101 @@ fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(p, area);
 }
 
-fn draw_detection(frame: &mut Frame, area: Rect, app: &App) {
-    let limit = app.game.detection_limit;
-    let ratio = app.game.detection.ratio(limit);
-    // El rojo ladrillo es exclusivo de la zona crítica (traza inminente).
-    let color = if ratio >= 0.75 {
-        BRICK
-    } else if ratio >= 0.4 {
-        AMBER_HI
-    } else {
-        AMBER_DIM
+/// Naturaleza de un indicador: define qué extremo es "malo" (color rojo).
+enum GaugeKind {
+    /// Rojo cuando SUBE: la traza del pentesting.
+    Trace,
+    /// Rojo cuando BAJA: un recurso que se agota (batería, oxígeno...).
+    Resource,
+    /// Solo ámbar, más brillante al llenarse: una barra de progreso.
+    Progress,
+}
+
+struct GaugeSpec {
+    title: String,
+    ratio: f64,
+    label: String,
+    kind: GaugeKind,
+}
+
+/// Indicadores del lateral: la "traza" (si el dominio la usa) y los medidores de
+/// campaña del nivel activo (batería, enlace, oxígeno...).
+fn collect_gauges(app: &App) -> Vec<GaugeSpec> {
+    let g = &app.game;
+    let mut gauges = Vec::new();
+
+    if g.campaign.uses_trace() {
+        let limit = g.detection_limit;
+        gauges.push(GaugeSpec {
+            title: String::from(" traza "),
+            ratio: g.detection.ratio(limit) as f64,
+            label: format!("{:.0} / {:.0}", g.detection.value, limit),
+            kind: GaugeKind::Trace,
+        });
+    }
+
+    for def in &g.core.meter_defs {
+        if let Some(m) = g.meter(&def.id) {
+            let (ratio, kind) = match def.trigger {
+                simterm_engine::MeterTrigger::AtLeast => (
+                    (m.value / def.limit.max(1.0)).clamp(0.0, 1.0) as f64,
+                    GaugeKind::Progress,
+                ),
+                simterm_engine::MeterTrigger::AtMost => {
+                    let span = (def.start - def.limit).abs().max(1.0);
+                    (
+                        ((m.value - def.limit) / span).clamp(0.0, 1.0) as f64,
+                        GaugeKind::Resource,
+                    )
+                }
+            };
+            gauges.push(GaugeSpec {
+                title: format!(" {} ", def.label()),
+                ratio,
+                label: format!("{:.0} / {:.0}", m.value, def.limit),
+                kind,
+            });
+        }
+    }
+
+    gauges
+}
+
+fn draw_gauge(frame: &mut Frame, area: Rect, spec: &GaugeSpec) {
+    // El rojo ladrillo se reserva a la zona crítica de cada tipo de indicador.
+    let color = match spec.kind {
+        GaugeKind::Trace => {
+            if spec.ratio >= 0.75 {
+                BRICK
+            } else if spec.ratio >= 0.4 {
+                AMBER_HI
+            } else {
+                AMBER_DIM
+            }
+        }
+        GaugeKind::Resource => {
+            if spec.ratio <= 0.25 {
+                BRICK
+            } else if spec.ratio <= 0.6 {
+                AMBER_HI
+            } else {
+                AMBER_DIM
+            }
+        }
+        GaugeKind::Progress => {
+            if spec.ratio >= 0.6 {
+                AMBER_HI
+            } else {
+                AMBER_DIM
+            }
+        }
     };
 
     let gauge = Gauge::default()
-        .block(border_block(" traza "))
+        .block(border_block(&spec.title))
         .gauge_style(Style::default().fg(color).bg(BG))
-        .ratio(ratio as f64)
-        .label(format!(
-            "{:.0} / {:.0}",
-            app.game.detection.value, limit
-        ));
+        .ratio(spec.ratio)
+        .label(spec.label.clone());
     frame.render_widget(gauge, area);
 }
 

@@ -127,8 +127,8 @@ impl EngineText {
 
     pub fn phase_reached(self, phase: &str) -> String {
         match self.language {
-            Language::Es => format!("[fase] Has alcanzado la fase {phase}."),
-            Language::En => format!("[phase] You reached the {phase} phase."),
+            Language::Es => format!("[etapa] Has alcanzado la etapa {phase}."),
+            Language::En => format!("[stage] You reached the {phase} stage."),
         }
     }
 
@@ -155,6 +155,14 @@ impl EngineText {
         }
     }
 
+    /// Cierre neutral (dominios sin la mecánica de exfiltración/traza).
+    pub fn level_completed_neutral(self) -> &'static str {
+        match self.language {
+            Language::Es => "## NIVEL COMPLETADO.",
+            Language::En => "## LEVEL COMPLETE.",
+        }
+    }
+
     pub fn level_summary(
         self,
         level: usize,
@@ -170,6 +178,14 @@ impl EngineText {
             Language::En => format!(
                 "Closeout M{level} · grade {grade} · trace {trace:.0}/{limit:.0} · t={time}"
             ),
+        }
+    }
+
+    /// Resumen de cierre neutral (sin traza ni grado de sigilo).
+    pub fn level_summary_neutral(self, level: usize, time: u32) -> String {
+        match self.language {
+            Language::Es => format!("Cierre N{level} · t={time}"),
+            Language::En => format!("Closeout L{level} · t={time}"),
         }
     }
 

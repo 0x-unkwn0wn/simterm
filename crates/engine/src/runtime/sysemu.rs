@@ -550,6 +550,7 @@ mod tests {
             language: Language::En,
             intro: vec![],
             stages: crate::model::campaign::default_stages(),
+            features: Default::default(),
             theme: Theme::default(),
             easter_eggs: vec![],
             fortunes: vec![],

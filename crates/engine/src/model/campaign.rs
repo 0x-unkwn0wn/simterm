@@ -68,6 +68,34 @@ pub struct Campaign {
     /// ficticias que el motor no puede sintetizar (p. ej. `systemctl status`).
     #[serde(default)]
     pub terminal: Vec<TerminalCommand>,
+    /// Interruptores de mecánicas de dominio (kill chain, traza, VFS...). Cada uno
+    /// es opcional: si se omite, cae al default heurístico. Ver [`Features`].
+    #[serde(default)]
+    pub features: Features,
+}
+
+/// Interruptores por-campaña para activar/desactivar mecánicas del dominio de
+/// pentesting en el motor y el frontend.
+///
+/// Cada toggle es `Option<bool>`: si se **omite**, cae al *default heurístico*
+/// (pentest si la campaña usa las etapas por defecto; dominio propio si declara
+/// las suyas). Si se **fija**, manda sobre la heurística. Así una campaña puede
+/// mezclar: p. ej. un dominio forense con etapas propias PERO con el VFS libre
+/// (`shell_for_vfs: Some(false)`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Features {
+    /// Mostrar la ayuda de la kill chain (secciones por fase, pistas de
+    /// intrusión) y los hints de arranque (vector de entrada + traza).
+    #[serde(default)]
+    pub kill_chain: Option<bool>,
+    /// Usar el medidor de detección/"traza": barra de la UI, hints y resumen.
+    #[serde(default)]
+    pub trace: Option<bool>,
+    /// Exigir "shell" (foothold, etapa POST) para explorar el VFS
+    /// (`ls`/`cat`/`cd`/...). Ponlo en `Some(false)` para un dominio que quiera
+    /// ficheros explorables sin la mecánica de intrusión.
+    #[serde(default)]
+    pub shell_for_vfs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +156,37 @@ fn default_signals() -> Vec<String> {
 }
 
 impl Campaign {
+    /// ¿La campaña usa las etapas por defecto (la kill chain del pentesting)? Es
+    /// el *default heurístico* de los toggles de [`Features`]: pentest si son las
+    /// de por defecto, dominio propio si declara las suyas.
+    pub fn uses_default_stages(&self) -> bool {
+        self.stages == default_stages()
+    }
+
+    /// ¿Mostrar la ayuda/hints de la kill chain? (toggle `features.kill_chain`,
+    /// default heurístico).
+    pub fn kill_chain(&self) -> bool {
+        self.features
+            .kill_chain
+            .unwrap_or_else(|| self.uses_default_stages())
+    }
+
+    /// ¿Usar el medidor de detección/"traza"? (toggle `features.trace`, default
+    /// heurístico).
+    pub fn uses_trace(&self) -> bool {
+        self.features
+            .trace
+            .unwrap_or_else(|| self.uses_default_stages())
+    }
+
+    /// ¿Exigir shell (foothold) para explorar el VFS? (toggle
+    /// `features.shell_for_vfs`, default heurístico).
+    pub fn shell_for_vfs(&self) -> bool {
+        self.features
+            .shell_for_vfs
+            .unwrap_or_else(|| self.uses_default_stages())
+    }
+
     /// Busca el easter egg cuyo conjunto de `triggers` contiene `verb`.
     pub fn easter_egg(&self, verb: &str) -> Option<&EasterEgg> {
         self.easter_eggs
