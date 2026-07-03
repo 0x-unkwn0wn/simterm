@@ -28,8 +28,11 @@ cargo run -p simterm -- --campaign ./campaigns/my_campaign
 
 ## 2. Build a Completable Experience
 
-The bundled sample campaign currently demonstrates a simulated hacking loop. A
-mission using that loop should provide a complete path through the scenario:
+The bundled sample campaign demonstrates one domain — a simulated hacking loop.
+A **pentest** mission using that loop should provide a complete path through the
+scenario (a non-pentest domain instead wins via a `Win` meter or a
+`CompleteMission` command and skips these steps — see
+[`examples/demo_orbita`](../examples/demo_orbita/campaign.ron)):
 
 1. The target has at least one exposed service.
 2. The target has real hidden vulnerabilities tied to those service ports.
@@ -173,8 +176,9 @@ Do not add story-specific branches to Rust code.
 You can add behavior in data, without Rust:
 
 - **`commands`** — declarative commands that *change state*: `SetFlag`,
-  `ClearFlag`, `AddTrace`, `UnlockAchievement`, `CompleteMission`, gated by
-  conditions (`FlagSet`, `Mission`, `Phase`, ...). Good for puzzles and branches.
+  `ClearFlag`, `AddTrace`, `AddMeter`, `ReachStage`, `UnlockAchievement`,
+  `CompleteMission`, gated by conditions (`FlagSet`, `Mission`, `Phase`, ...).
+  Good for puzzles, branches, and driving a custom domain's stages and meters.
 - **`terminal`** — authored realistic shell commands for fictional CLIs
   (`systemctl`, banners), with per-argument output, templates (`{host}`,
   `{env:X}`, `$VAR`), and an exit code. Presentational only.

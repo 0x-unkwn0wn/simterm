@@ -38,20 +38,26 @@ player input to the engine.
 ```text
 crates/engine/src/
   model/       immutable campaign data structures
-  runtime/     mutable game state and player actions
+  runtime/     domain-agnostic game state and shared runtime
+  domains/     domain modules that give the runtime meaning (pentest today)
   loader/      campaign loading from directories or .ron files
   validate/    semantic campaign validation (--doctor)
   asset/       asset-source abstraction for campaign-adjacent files
 ```
 
+The engine core is domain-agnostic; the pentesting kill chain is one **domain**
+under `domains/pentest/`. See [Domains](#domains).
+
 Important model files:
 
-- `campaign.rs` - campaign root: missions, theme, easter eggs, fortunes,
-  signals, achievements, declarative commands.
+- `campaign.rs` - campaign root: missions, stages, features, theme, easter eggs,
+  fortunes, signals, achievements, declarative commands.
 - `command.rs` - declarative campaign commands: triggers, effects, conditions.
-- `mission.rs` - mission settings, entry vectors, endings, multi-host networks.
-- `target.rs` - target hosts, services, vulnerabilities, local privilege
-  escalation metadata.
+- `mission.rs` - mission settings, meters, entry vectors, endings, multi-host
+  networks.
+- `meter.rs` - generic mission meter definitions (`MeterDef`: fuel, oxygen,
+  progress…).
+- `world.rs` - `WorldNode`: the neutral part of a node (name + filesystem).
 - `filesystem.rs` - virtual filesystem, loot, hashes, reversible binaries, and
   encoded files.
 - `toolbox.rs` - generic enumeration tools and service categories.
@@ -59,14 +65,37 @@ Important model files:
 
 Important runtime files:
 
-- `state.rs` - all mutable campaign and mission state.
-- `actions.rs` - recon, enumeration, research, exploit, login, privesc, VFS,
-  cleanup, netmap, pivot, completion, and declarative/terminal command dispatch.
+- `state.rs` - the `GameState`: mission/campaign state and progression.
+- `core.rs` - `CoreState`: the domain-agnostic runtime nucleus (shell session,
+  campaign meters, persistent bookkeeping) that `GameState` is being factored
+  into.
+- `meter.rs` - the generic `Meter` primitive (a value with a floor at 0; the
+  pentest trace is one meter).
 - `sysemu.rs` - emulated POSIX system commands (`uname`, `ps`, `netstat`, `env`,
   `grep`…) synthesized from host data, plus environment and `$VAR` expansion.
-- `detection.rs` - trace accumulation.
 - `balance.rs` - engine-level tuning constants.
 - `probability.rs` - randomness helpers for imperfect information.
+
+## Domains
+
+The core is domain-agnostic: generic stages, meters, a world node with a
+filesystem, declarative commands, and terminal emulation. A **domain** gives that
+core meaning by adding its own verbs, state, and mechanics. Pentesting is the one
+built-in domain, isolated under `domains/pentest/`:
+
+- `actions.rs` - the pentest verbs: recon, enumeration, research, exploit, login,
+  privesc, VFS, cleanup, netmap, pivot, completion, and declarative/terminal
+  command dispatch.
+- `target.rs` - `TargetNode`: a `WorldNode` plus the pentest payload (services,
+  vulnerabilities, `accepts_token`, local privilege escalation). The payload is
+  optional, so a non-pentest host is just a `WorldNode`.
+- `stage.rs` - the kill-chain `Phase`, a typed view over the generic stage cursor.
+- `achievements.rs` - the built-in pentest achievements.
+
+A "light" domain (forensics, a satellite console) needs no Rust at all: it is
+data — its own `stages`, `meters` with win/lose outcomes, generic hosts, and
+declarative commands — with the pentest mechanics switched off via `features`.
+See [`examples/demo_orbita`](../examples/demo_orbita/campaign.ron).
 
 ## Campaign Loading
 
@@ -94,10 +123,12 @@ The exact opening step depends on `EntryVector`:
 - `Passive` encourages `sniff` instead of noisy active scanning.
 - `Pivot` requires `connect` before the target can be scanned.
 
-That loop is one concrete experience built on top of the framework. Future
-campaigns can model different terminal-native interactions while reusing the
-same loader, runtime state, frontend, logs, campaign data, and presentation
-boundaries.
+That loop is one concrete **domain** built on the framework. A different domain
+models its own progression with campaign `stages`, wins or loses through
+`meters`, and turns off the pentest presentation via `features` — reusing the
+same loader, runtime, frontend, logs, and presentation boundaries. See
+[`examples/demo_orbita`](../examples/demo_orbita/campaign.ron) for a non-hacking
+example.
 
 ## Frontend Boundary
 
@@ -130,6 +161,13 @@ not the engine. To let the engine validate campaigns without depending on the
 frontend, the frontend passes a neutral list of reserved verbs
 (`registry::reserved_verbs()`) into `validate_campaign`. The engine never imports
 the registry.
+
+The pentest verbs are **domain-gated**. Each registry entry has a category, and
+the kill-chain categories (recon, enum, findings, multi-host, offline, local
+privesc) are only active when the campaign's `kill_chain` feature is on. In a
+non-pentest domain those verbs are parsed as unknown ("command not found") and
+dropped from help and autocomplete, so a satellite campaign never exposes
+`nmap`/`exploit`.
 
 ## Declarative Command Effects
 

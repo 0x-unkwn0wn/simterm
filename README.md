@@ -25,8 +25,13 @@ simterm-engine (library) + experience data (.ron) -> simterm terminal experience
 - Terminal UI built with `ratatui` and `crossterm`.
 - Reusable Rust runtime crate with no UI dependency.
 - External campaigns and experiences written in RON.
-- Command-driven runtime with phases, state transitions, trace pressure,
-  branching outcomes, logs, and campaign-defined flavor.
+- Command-driven runtime with generic stages, meters (fuel/oxygen/progress with
+  win/lose outcomes), state transitions, branching outcomes, logs, and
+  campaign-defined flavor.
+- Domain-agnostic core: the pentest kill chain is just one domain. Build a
+  forensics, satellite, or spacecraft experience purely in data, with the hacking
+  mechanics (kill-chain help, trace meter, shell-gated files, `nmap`/`exploit`
+  verbs) toggled off via campaign `features`. See `examples/demo_orbita`.
 - Generic content boundaries: framework mechanics stay in Rust, while story,
   targets, entities, files, objectives, UI text, and endings live in data.
 - Virtual filesystem support for terminal-native exploration, clues, rewards,
@@ -36,7 +41,8 @@ simterm-engine (library) + experience data (.ron) -> simterm terminal experience
   (looped, with fade-in). Silence if there is no file or no audio device; disable
   with `--no-music`.
 - Neutral sample campaign for testing and modding. It demonstrates a simulated
-  hacking scenario, not the limit of the framework.
+  hacking scenario, not the limit of the framework; `examples/demo_orbita` is a
+  non-hacking campaign (rescue a space probe) built entirely in data.
 
 ## Requirements
 
@@ -186,7 +192,8 @@ crates/
   simterm/          terminal frontend and CLI
 docs/                public documentation
 examples/
-  sample_campaign/   public fictional campaign used for tests and examples
+  sample_campaign/   public fictional campaign (pentest) for tests and examples
+  demo_orbita/       non-hacking demo campaign (rescue a space probe), data-only
 campaigns/           local campaign workspace
 ```
 

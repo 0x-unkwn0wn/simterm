@@ -32,9 +32,11 @@ Most fields have defaults. Define only the fields your campaign needs.
 Campaign(
     name: "My Campaign",
     language: en,
+    stages: ["RECON", "ENUM", "EXPLOIT", "POST"],
     intro: ["Opening line", "..."],
     missions: [ Mission(...) ],
     theme: ( ... ),
+    features: ( ... ),
     easter_eggs: [ ( ... ) ],
     fortunes: ["..."],
     signals: ["ALPHA", "BRAVO"],
@@ -50,9 +52,11 @@ Campaign(
 |---|---|---|---|
 | `name` | string | required | Campaign name. |
 | `language` | `es` or `en` | `es` | Language for generic engine/UI text. Campaign-authored story text is not translated automatically. |
+| `stages` | string list | kill chain | Ordered progression stage names. Default is the pentest kill chain (`RECON/ENUM/EXPLOIT/POST`). Declaring your own marks a non-pentest domain. See [Domains, Stages, and Features](#domains-stages-and-features). |
 | `intro` | string list | `[]` | Text shown when the campaign starts. |
 | `missions` | `Mission` list | required | Ordered mission sequence. Must not be empty. |
 | `theme` | `Theme` | neutral defaults | Branding and cosmetic UI text. |
+| `features` | `Features` | heuristic | Toggles for domain mechanics (kill-chain help, trace meter, shell-gated VFS). See [Domains, Stages, and Features](#domains-stages-and-features). |
 | `easter_eggs` | `EasterEgg` list | `[]` | Hidden flavor commands (no state change). |
 | `fortunes` | string list | generic defaults | Text used by `fortune`. |
 | `signals` | string list | generic defaults | Words used by the `signal` minigame. |
@@ -61,6 +65,54 @@ Campaign(
 | `env` | string→string map | `{}` | Environment variables for `env`, `export`, and `$VAR` expansion. |
 | `processes` | string list | `[]` | Extra `ps` rows, beyond those synthesized from `services`. |
 | `terminal` | `TerminalCommand` list | `[]` | Authored realistic shell commands (presentational). |
+
+## Domains, Stages, and Features
+
+SimTerm is not hacking-specific. The pentesting kill chain is just the **default
+domain**; the engine core (terminal emulation, campaign progression, meters,
+declarative commands, VFS) is domain-agnostic. A campaign becomes a different
+domain — forensics, operating a satellite, piloting a ship — purely with data.
+See [`examples/demo_orbita`](../examples/demo_orbita/campaign.ron) for a complete
+non-hacking campaign (rescue a space probe) driven entirely by data.
+
+### `stages`
+
+`stages` is the ordered list of progression stage names shown in the UI and used
+to gate declarative commands. If omitted, it defaults to the pentest kill chain
+(`RECON`, `ENUM`, `EXPLOIT`, `POST`).
+
+```ron
+stages: ["BOOT", "DIAGNOSE", "ALIGN", "LINK"],
+```
+
+Pentest missions advance stages through their built-in verbs (`nmap` reaches
+`ENUM`, etc.). A custom domain advances them from data with the
+[`ReachStage`](#effects-commandeffect) command effect.
+
+### `features`
+
+Whether a campaign uses **default stages** is the domain signal: a campaign that
+keeps the kill chain is treated as pentest; one that declares its own stages is
+treated as its own domain (its own commands in help, no kill-chain hints, its own
+meters instead of a trace bar, freely explorable VFS…).
+
+`features` lets you override that heuristic per toggle. Each is optional; when
+omitted it falls back to the stages heuristic, so you can **mix** — e.g. a
+forensics domain that still wants a shell-gated VFS.
+
+```ron
+features: (
+    kill_chain:    Some(false),  // kill-chain help sections + start hints
+    trace:         Some(false),  // detection "trace" meter: sidebar bar, hints, summary
+    shell_for_vfs: Some(false),  // require a "shell" (foothold) before ls/cat/cd
+),
+```
+
+| Toggle | Default | Controls |
+|---|---|---|
+| `kill_chain` | heuristic | Kill-chain help, start hints, exfil/completion wording, and whether pentest verbs (`nmap`, `exploit`…) exist at all. When off, those verbs are "command not found" and are hidden from help/autocomplete. |
+| `trace` | heuristic | The detection/trace meter: the sidebar gauge, trace hints, stealth grade and clean-op achievement. When off, the sidebar shows the mission's own [meters](#meters). |
+| `shell_for_vfs` | heuristic | Whether `ls`/`cat`/`cd`/`find` require a "shell" (POST stage). Off = files are freely explorable. |
 
 ## `Theme`
 
@@ -145,6 +197,8 @@ and campaign commands take priority over easter eggs with the same trigger.
 | `SetFlag("name")` | Activate a persistent campaign flag. |
 | `ClearFlag("name")` | Deactivate a persistent campaign flag. |
 | `AddTrace(f32)` | Add trace (positive) or reduce it (negative). |
+| `AddMeter("id", f32)` | Change a mission [meter](#meters) by its id (positive adds, negative subtracts), then evaluate its `on_limit`. |
+| `ReachStage("NAME")` | Advance to the named [stage](#stages) (case-insensitive; never goes backward). |
 | `UnlockAchievement("id")` | Unlock the `CampaignAchievement` with that `id`. |
 | `CompleteMission` | Complete the current mission (as if the objective was met). |
 
@@ -159,7 +213,7 @@ close a mission only when the player has done something specific.
 | `FlagSet("name")` | The named flag is active. |
 | `FlagNotSet("name")` | The named flag is not active. |
 | `Mission("mission-id")` | The current mission has that `Mission.id`. |
-| `Phase("post")` | The current phase is at least the named one: `recon`, `enum`, `exploit`, or `post`. |
+| `Phase("post")` | The current stage is at least the named one. Names are matched against `Campaign.stages` (case-insensitive); with the default stages that means `recon`, `enum`, `exploit`, or `post`. |
 
 ## Terminal Emulation (`env`, `processes`, `TerminalCommand`)
 
@@ -281,6 +335,7 @@ Mission(
     name: "FIRST CONTACT",
     briefing: ["Mission text"],
     detection_limit: 120.0,
+    meters: [ ( ... ) ],
     time_limit: Some(300),
     reactive: false,
     skill: 0.55,
@@ -299,7 +354,8 @@ Mission(
 | `id` | string | required | Internal mission identifier. |
 | `name` | string | required | Visible mission name. |
 | `briefing` | string list | `[]` | Text shown at mission start. |
-| `detection_limit` | float | `100.0` | Trace threshold for defeat. |
+| `detection_limit` | float | `100.0` | Trace threshold for defeat (the pentest trace meter). |
+| `meters` | `MeterDef` list | `[]` | Generic mission meters (fuel, oxygen, progress…). See [Meters](#meters). |
 | `time_limit` | `Some(u32)` or `None` | `None` | Mission time window in action ticks. |
 | `reactive` | bool | `false` | Enables active defense escalation. |
 | `skill` | float | `0.5` | Operator skill, normally `0.0..=1.0`. |
@@ -325,6 +381,50 @@ entry: Pivot(gateway: "bastion"),
 - `Cold` - selected ports are known and the mission starts in enumeration.
 - `Passive` - passive discovery with `sniff`; active scanning is noisier.
 - `Pivot` - requires `connect` before scanning.
+
+## Meters
+
+Meters are generic named resources with a threshold and an optional outcome —
+fuel or oxygen that runs out, a progress bar that fills, a battery, integrity.
+The pentest "trace" is a privileged built-in meter; these `MeterDef`s are
+declared per mission and drive any domain. When the mission's `trace` feature is
+off, they replace the trace gauge in the sidebar.
+
+```ron
+meters: [
+    (
+        id: "oxygen",
+        label: Some("O₂"),
+        start: 100.0,
+        limit: 0.0,
+        trigger: AtMost,
+        on_limit: Fail,
+        per_tick: -0.5,
+    ),
+    (
+        id: "progress",
+        start: 0.0,
+        limit: 100.0,
+        trigger: AtLeast,
+        on_limit: Win,
+    ),
+],
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | string | required | Stable id, referenced by `AddMeter`. Unique within the mission. |
+| `label` | optional string | `id` | Visible label (sidebar gauge). |
+| `start` | float | `0.0` | Initial value at mission start. |
+| `limit` | float | required | Threshold that fires `on_limit`. |
+| `trigger` | `AtLeast` or `AtMost` | `AtLeast` | `AtLeast` fires at `value >= limit` (rising: progress); `AtMost` fires at `value <= limit` (falling: fuel/oxygen). |
+| `on_limit` | `None`/`Fail`/`Win` | `None` | Outcome when the threshold is reached: `Fail` loses the mission, `Win` completes it, `None` is just an indicator. |
+| `per_tick` | float | `0.0` | Automatic drift per clock tick (e.g. `-0.5` depletes over time). `0.0` = only changes via `AddMeter`. |
+
+Change a meter from data with the [`AddMeter`](#effects-commandeffect) command
+effect. The clock only advances through actions that spend time, so a
+declarative-only campaign should model cost with `AddMeter` per action rather
+than relying on `per_tick`.
 
 ## `Ending`
 
@@ -358,6 +458,17 @@ When endings are present, the player selects one with `choose <n>`.
     accepts_token: Some("relay-token"),
     local_privesc: Some((kind: Sudo, note: "sudo vim can be abused")),
 )
+```
+
+A `TargetNode` is a generic node (`hostname`/`ip`/`os` + `filesystem`) plus the
+pentest payload (`services`, `vulnerabilities`, `accepts_token`, `local_privesc`).
+The payload is **optional**: a non-pentest host declares only identity and an
+optional `filesystem`, so its files are still explorable (see the `shell_for_vfs`
+[feature](#features)).
+
+```ron
+// A generic node with no pentest payload.
+target: (hostname: "probe-7", ip: "3.2 AU", os: "RTOS-9", filesystem: [ ... ]),
 ```
 
 Service names determine enumeration categories:
@@ -531,13 +642,14 @@ WAV is decoded. Audio is a frontend feature: the engine never touches it — the
 
 ## Validation Invariants
 
-`--check` and tests expect campaigns to stay completable:
+`--check` and the engine tests expect campaigns to stay completable:
 
 - The campaign has at least one mission.
-- Each playable host has services and vulnerabilities.
 - Any objective path points to a real VFS file.
-- The host that contains the objective provides a deterministic route to root,
-  such as readable `privesc_key` loot.
+- **Pentest missions** additionally need each playable host to have services and
+  vulnerabilities, and the objective host to provide a deterministic route to
+  root (e.g. readable `privesc_key` loot). Non-pentest hosts have no such
+  requirement — they complete via a `Win` meter or a `CompleteMission` command.
 
 ### `--doctor` semantic checks
 
@@ -557,8 +669,10 @@ It exits non-zero if there are any **errors**. It reports at least:
 - Duplicate achievement IDs.
 - Achievement triggers that reference a missing mission or an out-of-range
   `ChooseEnding` choice.
-- Declarative-command effects/conditions that reference a missing achievement,
-  mission, or an invalid phase name.
+- Declarative-command effects/conditions that reference a missing achievement or
+  mission, a `Phase`/`ReachStage` name not in `stages`, or an `AddMeter` id not
+  declared in any mission.
+- Duplicate or empty meter ids within a mission.
 
 **Warnings** (smell wrong, still load):
 
