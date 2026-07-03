@@ -616,6 +616,21 @@ pub const COMMANDS: &[CommandSpec] = &[
 ];
 
 impl Category {
+    /// ¿Categoría específica del dominio pentest (kill chain)? Las demás
+    /// (General, VFS, Sistema, Finales, Minijuegos) son genéricas y valen a
+    /// cualquier dominio.
+    fn is_pentest(self) -> bool {
+        matches!(
+            self,
+            Category::Recon
+                | Category::Enum
+                | Category::Findings
+                | Category::MultiHost
+                | Category::Offline
+                | Category::LocalPrivesc
+        )
+    }
+
     /// Etiqueta de sección para la referencia de ayuda.
     fn label(self) -> &'static str {
         match self {
@@ -662,9 +677,13 @@ fn kind_tag(kind: CommandKind) -> &'static str {
 /// Referencia compacta de comandos generada DESDE el registro (una línea por
 /// comando, agrupada por categoría). La consume la ayuda (`help`), de modo que la
 /// lista de built-ins, sus alias y su uso tienen una única fuente de verdad.
-pub fn reference_lines() -> Vec<String> {
+pub fn reference_lines(kill_chain: bool) -> Vec<String> {
     let mut lines = Vec::new();
     for cat in CATEGORY_ORDER {
+        // En dominios no-pentest, se omiten las categorías de la kill chain.
+        if !kill_chain && cat.is_pentest() {
+            continue;
+        }
         let specs: Vec<&CommandSpec> = COMMANDS.iter().filter(|s| s.category == *cat).collect();
         // La categoría ENUM se cubre con las herramientas de toolbox (ver ayuda).
         if specs.is_empty() {
@@ -693,14 +712,22 @@ pub fn reference_lines() -> Vec<String> {
 
 /// Todos los verbos completables (nombres + alias del catálogo + herramientas de
 /// enumeración). Lo consume el autocompletado.
-pub fn all_verbs() -> Vec<&'static str> {
+/// Verbos completables según el dominio: todos si `kill_chain`, o solo los
+/// genéricos (sin verbos de la kill chain ni herramientas de enumeración) para
+/// un dominio propio.
+pub fn all_verbs_for(kill_chain: bool) -> Vec<&'static str> {
     let mut v = Vec::new();
     for spec in COMMANDS {
+        if !kill_chain && spec.category.is_pentest() {
+            continue;
+        }
         v.push(spec.name);
         v.extend_from_slice(spec.aliases);
     }
-    for t in toolbox::TOOLS {
-        v.push(t.name);
+    if kill_chain {
+        for t in toolbox::TOOLS {
+            v.push(t.name);
+        }
     }
     v
 }
@@ -739,8 +766,18 @@ mod tests {
     }
 
     #[test]
+    fn dominio_propio_excluye_la_kill_chain() {
+        let generic = all_verbs_for(false);
+        assert!(generic.contains(&"help")); // genérico
+        assert!(generic.contains(&"ls")); // VFS genérico
+        assert!(!generic.contains(&"nmap")); // pentest fuera
+        assert!(!generic.contains(&"exploit"));
+        assert!(!generic.contains(&"nikto")); // herramienta de enumeración fuera
+    }
+
+    #[test]
     fn all_verbs_incluye_alias_y_herramientas() {
-        let verbs = all_verbs();
+        let verbs = all_verbs_for(true);
         assert!(verbs.contains(&"logros"));
         assert!(verbs.contains(&"achievements")); // alias
         assert!(verbs.contains(&"sqlmap")); // herramienta

@@ -435,7 +435,7 @@ impl App {
     /// inyectada por el autoplayer). El eco, el historial y las transiciones son
     /// idénticos en ambos casos.
     fn submit_line(&mut self, raw: String) {
-        let cmd = command::parse(&raw);
+        let cmd = command::parse(&raw, self.game.campaign.kill_chain());
         self.hist_pos = None;
 
         // El eco del comando se registra con el prompt (excepto entrada vacía).

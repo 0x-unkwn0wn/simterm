@@ -69,6 +69,13 @@ fn main() -> ExitCode {
     };
     let campaign = loaded.campaign.clone();
 
+    // El autoplayer razona con la lógica de la kill chain (recon/exploit/...): no
+    // aplica a un dominio propio. Se desactiva silenciosamente en ese caso.
+    if autoplay.is_some() && !campaign.kill_chain() {
+        eprintln!("simterm: --autoplay solo está disponible en campañas de intrusión.");
+        autoplay = None;
+    }
+
     match mode {
         // Validación básica: confirma que la campaña carga y termina (sin TUI).
         Mode::Check => {

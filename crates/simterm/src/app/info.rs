@@ -91,7 +91,7 @@ impl App {
             }
             Language::En => String::from("--- QUICK REFERENCE (from the command registry) ---"),
         });
-        lines.extend(crate::registry::reference_lines());
+        lines.extend(crate::registry::reference_lines(kill_chain));
 
         // Comandos definidos por la campaña (declarativos + terminal autorados).
         lines.extend(self.help_campaign(lang));

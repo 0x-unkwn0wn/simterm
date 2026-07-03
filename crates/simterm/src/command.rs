@@ -105,7 +105,42 @@ pub enum Command {
     Mastermind(Option<String>),
 }
 
-pub fn parse(input: &str) -> Command {
+impl Command {
+    /// ¿Es un verbo de la kill chain (pentesting)? En dominios propios (no
+    /// pentest) estos verbos no existen: el parser los degrada a `Unknown`.
+    pub fn is_pentest(&self) -> bool {
+        matches!(
+            self,
+            Command::Target
+                | Command::Recon
+                | Command::Sniff
+                | Command::Connect(_)
+                | Command::Netmap
+                | Command::Pivot(_)
+                | Command::Enumerate(..)
+                | Command::Research(_)
+                | Command::Intel
+                | Command::Exploit(_)
+                | Command::Login
+                | Command::Privesc
+                | Command::Loot
+                | Command::John(_)
+                | Command::Strings(_)
+                | Command::Disasm(_)
+                | Command::Solve(..)
+                | Command::DecodeFile { .. }
+                | Command::LocalEnum(_)
+                | Command::Cleanup
+                | Command::BadPort(_)
+                | Command::BadId(_)
+        )
+    }
+}
+
+/// Parsea la línea. `pentest` indica si el dominio activo usa la kill chain; si
+/// no, los verbos pentest se degradan a `Unknown` (caen a comando de campaña /
+/// easter egg / "command not found").
+pub fn parse(input: &str, pentest: bool) -> Command {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Command::Empty;
@@ -120,6 +155,10 @@ pub fn parse(input: &str) -> Command {
         .skip(1)
         .map(str::to_string)
         .collect();
+    // Copias reservadas para degradar un verbo pentest a `Unknown` (ver el gate
+    // al final): el `match` consume `verb`/`all_args` en algunas ramas.
+    let gated_verb = verb.clone();
+    let gated_args = all_args.clone();
     // Todo lo que sigue al primer token (para echo / decode multipalabra).
     let rest = trimmed
         .splitn(2, char::is_whitespace)
@@ -128,7 +167,7 @@ pub fn parse(input: &str) -> Command {
         .trim()
         .to_string();
 
-    match verb.as_str() {
+    let cmd = match verb.as_str() {
         "help" | "h" | "?" => Command::Help {
             all: matches!(arg, Some("all") | Some("todo") | Some("full") | Some("-a")),
         },
@@ -218,7 +257,18 @@ pub fn parse(input: &str) -> Command {
                 }
             }
         }
+    };
+
+    // Gate de dominio: en una campaña no-pentest, los verbos de la kill chain se
+    // degradan a `Unknown` (el dispatcher probará comandos de campaña / easter
+    // eggs y, si nada casa, dirá "command not found").
+    if !pentest && cmd.is_pentest() {
+        return Command::Unknown {
+            verb: gated_verb,
+            args: gated_args,
+        };
     }
+    cmd
 }
 
 /// Verbos de sistema emulados por el motor (`runtime::sysemu`). El parser los
@@ -262,5 +312,31 @@ fn parse_id(arg: Option<&str>, f: impl Fn(usize) -> Command) -> Command {
             Err(_) => Command::BadId(raw.to_string()),
         },
         None => Command::BadId(String::from("(vacío)")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbos_pentest_se_degradan_en_dominio_propio() {
+        // En dominio pentest, la kill chain existe.
+        assert_eq!(parse("nmap", true), Command::Recon);
+        assert!(matches!(parse("exploit 1", true), Command::Exploit(1)));
+
+        // En un dominio propio, se degradan a Unknown ("command not found").
+        match parse("nmap", false) {
+            Command::Unknown { verb, .. } => assert_eq!(verb, "nmap"),
+            other => panic!("esperaba Unknown, fue {other:?}"),
+        }
+        assert!(matches!(parse("exploit 1", false), Command::Unknown { .. }));
+        // Una herramienta de enumeración (toolbox) también.
+        assert!(matches!(parse("nikto 80", false), Command::Unknown { .. }));
+
+        // Los verbos genéricos NO se degradan nunca.
+        assert!(matches!(parse("help", false), Command::Help { .. }));
+        assert!(matches!(parse("ls /x", false), Command::Ls(_)));
+        assert!(matches!(parse("echo hola", false), Command::Echo(_)));
     }
 }

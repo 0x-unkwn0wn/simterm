@@ -478,7 +478,7 @@ mod tests {
     /// frontend. Hace panic si el autoplay emite un comando no soportado (esa es
     /// justamente la comprobación clave: solo debe emitir comandos válidos).
     fn run(game: &mut GameState, line: &str) -> bool {
-        match command::parse(line) {
+        match command::parse(line, true) {
             Command::Recon => actions::recon(game),
             Command::Sniff => actions::sniff(game),
             Command::Connect(host) => actions::connect(game, host),

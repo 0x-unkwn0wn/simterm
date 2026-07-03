@@ -82,7 +82,8 @@ fn finish(prefix: &str, frag: &str, mut cands: Vec<String>) -> Completion {
 
 fn verb_candidates(state: &GameState, frag: &str) -> Vec<String> {
     // Verbos built-in (nombres + alias) y herramientas, desde el registro único.
-    let mut v: Vec<String> = registry::all_verbs()
+    // En un dominio propio se excluyen los verbos de la kill chain.
+    let mut v: Vec<String> = registry::all_verbs_for(state.campaign.kill_chain())
         .iter()
         .map(|s| s.to_string())
         .collect();
