@@ -1,5 +1,10 @@
 # ---- Build ----
 /target/
+# Directorios target alternativos usados al empaquetar el .exe embebido.
+/target_embed*/
+/target-pack/
+# .exe de campañas empaquetadas (pack.ps1 los deja en la raíz).
+/*.exe
 **/*.rs.bk
 
 # ---- Estado de runtime (no es código ni contenido del repo) ----

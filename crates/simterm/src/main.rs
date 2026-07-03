@@ -10,24 +10,24 @@ mod autoplay;
 mod command;
 mod completion;
 mod effects;
+mod embedded;
 mod registry;
 mod ui;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use simterm_engine::{load_campaign, validate_campaign, ValidationReport};
+use simterm_engine::{load_campaign, validate_campaign, AssetSource, Campaign, ValidationReport};
 
 use app::App;
 
@@ -37,7 +37,7 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 const DEFAULT_CAMPAIGN: &str = "examples/sample_campaign";
 
 fn main() -> ExitCode {
-    let (path, mode, no_music, autoplay) = match parse_args() {
+    let (path, mode, no_music, mut autoplay) = match parse_args() {
         Args::Run {
             path,
             mode,
@@ -50,8 +50,16 @@ fn main() -> ExitCode {
         }
     };
 
+    // Campaña empaquetada con el autoplay desactivado: ignora cualquier
+    // `--autoplay*` para que el jugador no pueda auto-resolver (spoilear) la
+    // campaña. En binarios normales `autoplay_disabled()` es siempre `false`.
+    if embedded::autoplay_disabled() && autoplay.is_some() {
+        eprintln!("simterm: el autoplay está desactivado en esta campaña.");
+        autoplay = None;
+    }
+
     // Carga la campaña ANTES de tocar el terminal: si falla, mensaje limpio.
-    let campaign = match load_campaign(&path) {
+    let loaded = match load_selected_campaign(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("simterm: {e}");
@@ -59,6 +67,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let campaign = loaded.campaign.clone();
 
     match mode {
         // Validación básica: confirma que la campaña carga y termina (sin TUI).
@@ -86,12 +95,13 @@ fn main() -> ExitCode {
             // El audio es opcional: solo se prepara si la campaña declara alguna
             // pista (`Mission.music`) o existe el `music/` convencional, y salvo
             // `--no-music`. Sin dispositivo o sin ficheros, se juega en silencio.
-            let root = campaign_root(&path);
-            let has_music =
-                campaign.missions.iter().any(|m| m.music.is_some()) || root.join("music").is_dir();
+            let has_music = loaded.has_music(&path);
             let audio = if no_music || !has_music {
                 None
+            } else if let Some(assets) = loaded.assets {
+                audio::Audio::try_new_assets(assets)
             } else {
+                let root = campaign_root(&path);
                 audio::Audio::try_new(root)
             };
             if let Err(err) = run_game(campaign, audio, autoplay) {
@@ -101,6 +111,45 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+struct LoadedCampaign {
+    campaign: Campaign,
+    assets: Option<Arc<dyn AssetSource>>,
+}
+
+impl LoadedCampaign {
+    fn has_music(&self, path: &Path) -> bool {
+        if let Some(assets) = &self.assets {
+            self.campaign.missions.iter().enumerate().any(|(i, m)| {
+                let track = m
+                    .music
+                    .clone()
+                    .unwrap_or_else(|| format!("music/mission_{}_theme.wav", i + 1));
+                assets.contains(&track)
+            })
+        } else {
+            let root = campaign_root(path);
+            self.campaign.missions.iter().any(|m| m.music.is_some()) || root.join("music").is_dir()
+        }
+    }
+}
+
+fn load_selected_campaign(path: &Path) -> Result<LoadedCampaign, String> {
+    if embedded::available() {
+        let embedded = embedded::load().map_err(|e| e.to_string())?;
+        let assets: Arc<dyn AssetSource> = Arc::new(embedded.assets);
+        return Ok(LoadedCampaign {
+            campaign: embedded.campaign,
+            assets: Some(assets),
+        });
+    }
+
+    let campaign = load_campaign(path).map_err(|e| e.to_string())?;
+    Ok(LoadedCampaign {
+        campaign,
+        assets: None,
+    })
 }
 
 /// Directorio raíz de una campaña: la propia ruta si `--campaign` es un
