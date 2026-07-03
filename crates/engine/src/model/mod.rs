@@ -6,8 +6,12 @@ pub mod command;
 pub mod filesystem;
 pub mod intel;
 pub mod language;
+pub mod meter;
 pub mod mission;
-pub mod target;
+/// Reubicado en el dominio de pentesting (Fase 1 de la generalización). Se
+/// re-exporta aquí para que `crate::model::target` siga resolviendo.
+pub use crate::domains::pentest::target;
 pub mod terminal;
 pub mod theme;
 pub mod toolbox;
+pub mod world;

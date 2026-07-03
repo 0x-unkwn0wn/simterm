@@ -85,7 +85,7 @@ pub fn env_pairs(state: &GameState) -> BTreeMap<String, String> {
         env.insert(k.clone(), v.clone());
     }
     // Overrides de sesión (`export`).
-    for (k, v) in &state.env_session {
+    for (k, v) in &state.core.env_session {
         env.insert(k.clone(), v.clone());
     }
     env
@@ -94,7 +94,7 @@ pub fn env_pairs(state: &GameState) -> BTreeMap<String, String> {
 /// Valor de una variable de entorno (o `$?`), si existe.
 pub fn env_value(state: &GameState, name: &str) -> Option<String> {
     if name == "?" {
-        return Some(state.last_exit.to_string());
+        return Some(state.core.last_exit.to_string());
     }
     env_pairs(state).get(name).cloned()
 }
@@ -118,7 +118,7 @@ pub fn expand_vars(state: &GameState, input: &str) -> String {
         }
         let next = chars[i + 1];
         if next == '?' {
-            out.push_str(&state.last_exit.to_string());
+            out.push_str(&state.core.last_exit.to_string());
             i += 2;
         } else if next == '{' {
             // ${NOMBRE}
@@ -327,10 +327,10 @@ fn export_cmd(state: &mut GameState, args: &[String]) -> ShellOutput {
             }
             // El valor puede contener referencias a otras variables.
             let value = expand_vars(state, v);
-            if let Some(slot) = state.env_session.iter_mut().find(|(name, _)| name == k) {
+            if let Some(slot) = state.core.env_session.iter_mut().find(|(name, _)| name == k) {
                 slot.1 = value;
             } else {
-                state.env_session.push((k.to_string(), value));
+                state.core.env_session.push((k.to_string(), value));
             }
         }
         // `export VAR` a secas (sin '=') no cambia nada visible aquí.
@@ -549,6 +549,7 @@ mod tests {
             name: String::from("T"),
             language: Language::En,
             intro: vec![],
+            stages: crate::model::campaign::default_stages(),
             theme: Theme::default(),
             easter_eggs: vec![],
             fortunes: vec![],
@@ -563,6 +564,7 @@ mod tests {
                 name: String::from("M0"),
                 briefing: vec![],
                 detection_limit: 100.0,
+                meters: vec![],
                 time_limit: None,
                 reactive: false,
                 skill: 0.5,
@@ -597,7 +599,7 @@ mod tests {
         let mut g = state();
         g.reach_phase(Phase::Post);
         g.is_root = true;
-        g.last_exit = 3;
+        g.core.last_exit = 3;
         assert_eq!(expand_vars(&g, "$USER"), "root");
         assert_eq!(expand_vars(&g, "${APP_SECRET}"), "s3cr3t");
         assert_eq!(expand_vars(&g, "code=$?"), "code=3");

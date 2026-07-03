@@ -26,6 +26,7 @@
 //! does not depend on any interface library.
 
 pub mod asset;
+pub mod domains;
 pub mod loader;
 pub mod model;
 pub mod runtime;
@@ -36,15 +37,18 @@ pub mod validate;
 pub use model::campaign::{Campaign, CampaignAchievement, CampaignAchievementTrigger};
 pub use model::command::{CampaignCommand, CommandCondition, CommandEffect};
 pub use model::filesystem::{self, FsNode, Loot};
+pub use model::meter::{MeterDef, MeterTrigger, OnLimit};
 pub use model::intel::{FindingSource, FindingStatus, IntelFinding};
 pub use model::language::{EngineText, Language};
 pub use model::mission::{Ending, EntryVector, Mission, NetHost};
 pub use model::target::{Service, TargetNode, Vulnerability};
 pub use model::terminal::TerminalCommand;
 pub use model::theme::{EasterEgg, Theme};
+pub use model::world::WorldNode;
 pub use model::toolbox::{self, EnumTool, ServiceCat};
 
 pub use runtime::actions;
+pub use runtime::core::CoreState;
 pub use runtime::state::{AchievementId, GameOutcome, GameState, Phase, ACHIEVEMENTS};
 pub use runtime::sysemu::{self, ShellOutput};
 

@@ -131,6 +131,13 @@ pub fn validate_campaign(campaign: &Campaign, reserved_verbs: &[&str]) -> Valida
     let mut seen_missions: HashSet<&str> = HashSet::new();
     let mission_ids: HashSet<&str> = campaign.missions.iter().map(|m| m.id.as_str()).collect();
 
+    // Ids de medidores declarados en cualquier misión (para validar `AddMeter`).
+    let declared_meters: HashSet<&str> = campaign
+        .missions
+        .iter()
+        .flat_map(|m| m.meters.iter().map(|d| d.id.as_str()))
+        .collect();
+
     // Tokens obtenibles en toda la campaña (para gating de servicios).
     let mut obtainable: HashSet<String> = HashSet::new();
     for m in &campaign.missions {
@@ -178,6 +185,16 @@ pub fn validate_campaign(campaign: &Campaign, reserved_verbs: &[&str]) -> Valida
                 &loc,
                 "time_limit es Some(0): la operación se pierde al instante",
             );
+        }
+
+        // Medidores del nivel: ids no vacíos y únicos dentro de la misión.
+        let mut seen_meters: HashSet<&str> = HashSet::new();
+        for d in &m.meters {
+            if d.id.trim().is_empty() {
+                report.error(&loc, "un medidor del nivel tiene id vacío");
+            } else if !seen_meters.insert(d.id.as_str()) {
+                report.error(&loc, format!("medidor de nivel duplicado: '{}'", d.id));
+            }
         }
 
         // Hosts de la misión.
@@ -445,6 +462,17 @@ pub fn validate_campaign(campaign: &Campaign, reserved_verbs: &[&str]) -> Valida
                     );
                 }
             }
+            if let CommandEffect::AddMeter(id, _) = e {
+                if !declared_meters.contains(id.as_str()) {
+                    report.error(
+                        &loc,
+                        format!(
+                            "AddMeter('{}') referencia un medidor no declarado en ninguna misión",
+                            id
+                        ),
+                    );
+                }
+            }
         }
 
         for c in &cmd.conditions {
@@ -461,14 +489,14 @@ pub fn validate_campaign(campaign: &Campaign, reserved_verbs: &[&str]) -> Valida
                     }
                 }
                 CommandCondition::Phase(p) => {
-                    let valid = matches!(
-                        p.to_lowercase().as_str(),
-                        "recon" | "enum" | "exploit" | "post"
-                    );
+                    let valid = campaign.stages.iter().any(|s| s.eq_ignore_ascii_case(p));
                     if !valid {
                         report.error(
                             &loc,
-                            format!("la condición Phase('{}') no es una fase válida (recon/enum/exploit/post)", p),
+                            format!(
+                                "la condición Phase('{}') no coincide con ninguna etapa declarada de la campaña",
+                                p
+                            ),
                         );
                     }
                 }
@@ -637,6 +665,7 @@ mod tests {
             name: id.to_uppercase(),
             briefing: vec![],
             detection_limit: 100.0,
+            meters: vec![],
             time_limit: None,
             reactive: false,
             skill: 0.5,
@@ -656,6 +685,7 @@ mod tests {
             name: String::from("T"),
             language: Language::Es,
             intro: vec![],
+            stages: crate::model::campaign::default_stages(),
             theme: Theme::default(),
             easter_eggs: vec![],
             fortunes: vec![],
@@ -698,6 +728,17 @@ mod tests {
             .join(" | ");
         assert!(joined.contains("duplicado"), "{joined}");
         assert!(joined.contains("objetivo"), "{joined}");
+    }
+
+    #[test]
+    fn host_generico_sin_servicios_ni_vulns_es_valido() {
+        // Un nodo de otro dominio (sin payload de intrusión) no produce errores.
+        let mut host = base_host();
+        host.services.clear();
+        host.vulnerabilities.clear();
+        let camp = campaign_with(vec![mission("op1", None, host)]);
+        let report = validate_campaign(&camp, &[]);
+        assert!(!report.has_errors(), "errores: {:?}", report.errors);
     }
 
     #[test]

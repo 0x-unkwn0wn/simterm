@@ -45,6 +45,9 @@ pub enum CommandEffect {
     ClearFlag(String),
     /// Suma traza (valor positivo) o la reduce (valor negativo).
     AddTrace(f32),
+    /// Modifica un medidor de campaña por su `id` (positivo suma, negativo resta)
+    /// y evalúa su `on_limit`.
+    AddMeter(String, f32),
     /// Desbloquea un logro de campaña por su `id`.
     UnlockAchievement(String),
     /// Completa la misión actual (equivale a lograr el objetivo). Combínalo con
@@ -61,7 +64,9 @@ pub enum CommandCondition {
     FlagNotSet(String),
     /// Solo disponible dentro de la misión con este `Mission.id`.
     Mission(String),
-    /// Solo disponible en esta fase: `"recon"`, `"enum"`, `"exploit"` o `"post"`.
+    /// Solo disponible al haber alcanzado la etapa nombrada (por su nombre en
+    /// `Campaign.stages`, sin distinguir mayúsculas). Por defecto (kill chain):
+    /// `"recon"`, `"enum"`, `"exploit"` o `"post"`.
     Phase(String),
 }
 

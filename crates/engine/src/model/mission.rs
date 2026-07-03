@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 
+use crate::model::meter::MeterDef;
 use crate::model::target::TargetNode;
 
 /// Umbral de detección por defecto si una misión no especifica el suyo. Es un
@@ -92,6 +93,10 @@ pub struct Mission {
     /// Detección a la que se pierde el nivel.
     #[serde(default = "default_detection_limit")]
     pub detection_limit: f32,
+    /// Medidores genéricos del nivel (combustible, oxígeno, progreso...): cada
+    /// uno con su umbral y qué pasa al alcanzarlo. Vacío = solo la traza clásica.
+    #[serde(default)]
+    pub meters: Vec<MeterDef>,
     /// Ventana de tiempo de la operación, en ticks de reloj. Si el reloj la
     /// supera, derrota por "ventana cerrada". `None` = sin límite (clásico).
     #[serde(default)]

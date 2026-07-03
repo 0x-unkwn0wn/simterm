@@ -28,6 +28,12 @@ pub struct Campaign {
     pub intro: Vec<String>,
     /// Niveles, en orden de progresión.
     pub missions: Vec<Mission>,
+    /// Nombres de las etapas de progresión, en orden. Por defecto, la kill chain
+    /// del pentesting (RECON/ENUM/EXPLOIT/POST). Un dominio distinto (satélite,
+    /// forense...) declara aquí las suyas y el motor las usa como etiquetas y para
+    /// las condiciones de etapa de los comandos declarativos.
+    #[serde(default = "default_stages")]
+    pub stages: Vec<String>,
 
     /// Branding y textos cosméticos. Si se omite, el motor usa defaults neutrales.
     #[serde(default)]
@@ -87,6 +93,18 @@ pub enum CampaignAchievementTrigger {
     ChooseEnding { mission: String, choice: usize },
     /// Se desbloquea al completar la campaña.
     CampaignComplete,
+}
+
+/// Etapas por defecto: la kill chain del pentesting. Es el default pragmático
+/// (la mayoría de campañas son de intrusión); un dominio distinto declara las
+/// suyas en `Campaign.stages`.
+pub(crate) fn default_stages() -> Vec<String> {
+    vec![
+        String::from("RECON"),
+        String::from("ENUM"),
+        String::from("EXPLOIT"),
+        String::from("POST"),
+    ]
 }
 
 /// Aforismos neutrales por defecto (no pertenecen a ninguna historia concreta).

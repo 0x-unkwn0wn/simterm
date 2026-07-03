@@ -11,8 +11,8 @@ impl App {
     /// vuelca además la referencia completa de comandos.
     pub(super) fn cmd_help(&mut self, all: bool) {
         let lang = self.game.campaign.language;
-        let phase = self.game.phase;
-        let phase_label = phase.label();
+        let phase = self.game.phase();
+        let phase_label = self.game.stage_label().to_string();
 
         let mut lines: Vec<String> = Vec::new();
 
@@ -420,7 +420,7 @@ impl App {
             ),
             format!(
                 "fase          : {}   skill efectivo {:.2}",
-                g.phase.label(),
+                g.stage_label(),
                 g.effective_skill()
             ),
             format!(
@@ -437,11 +437,23 @@ impl App {
             time_line,
             format!(
                 "detección     : {:.0}/{:.0}  (ruido total {:.0})",
-                g.detection.detection, g.detection_limit, g.detection.total_noise
+                g.detection.value, g.detection_limit, g.detection.total
             ),
             format!("hallazgos     : {total} ({verified} con veredicto de verificación)"),
             format!("campaña       : {outcome}"),
         ];
+        // Medidores de campaña declarados por el nivel (combustible, oxígeno...).
+        let mut lines = lines;
+        for def in &g.core.meter_defs {
+            if let Some(m) = g.meter(&def.id) {
+                lines.push(format!(
+                    "{:<14}: {:.0}/{:.0}",
+                    def.label(),
+                    m.value,
+                    def.limit
+                ));
+            }
+        }
         for l in lines {
             self.game.log(l);
         }

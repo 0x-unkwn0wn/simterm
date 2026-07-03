@@ -15,13 +15,22 @@ use serde::{Deserialize, Serialize};
 use crate::model::campaign::{Campaign, CampaignAchievement, CampaignAchievementTrigger};
 use crate::model::filesystem::{self, Loot, Reward};
 use crate::model::intel::{FindingSource, FindingStatus, IntelFinding};
-use crate::model::language::{EngineText, Language};
+use crate::model::language::EngineText;
+use crate::model::meter::OnLimit;
 use crate::model::mission::{EntryVector, Mission};
 use crate::model::target::TargetNode;
 use crate::model::toolbox::{self, ServiceCat};
 use crate::runtime::balance;
-use crate::runtime::detection::DetectionState;
+use crate::runtime::core::CoreState;
+use crate::runtime::meter::Meter;
 use crate::runtime::probability::clamp01;
+
+// Logros builtin reubicados en el dominio de pentesting (Fase 1). Se re-exportan
+// para que `crate::runtime::state::{AchievementId, ACHIEVEMENTS}` sigan resolviendo.
+pub use crate::domains::pentest::achievements::{AchievementId, ACHIEVEMENTS};
+// La fase de la kill chain es una vista tipada del dominio pentest sobre el
+// cursor de etapas genérico (`stage`). Se re-exporta para compatibilidad.
+pub use crate::domains::pentest::stage::Phase;
 
 /// Fichero de guardado de progreso de campaña.
 const SAVE_PATH: &str = "save.ron";
@@ -64,7 +73,7 @@ pub struct HostSlot {
     pub reachable: bool,
     // Snapshot del runtime mientras NO es el host activo.
     pub discovered_ports: Vec<u16>,
-    pub phase: Phase,
+    pub stage: usize,
     pub intel: Vec<IntelFinding>,
     pub next_id: usize,
     pub is_root: bool,
@@ -88,7 +97,7 @@ impl HostSlot {
             links,
             reachable,
             discovered_ports: Vec::new(),
-            phase: Phase::Recon,
+            stage: 0,
             intel: Vec::new(),
             next_id: 1,
             is_root: false,
@@ -171,112 +180,6 @@ pub enum GameOutcome {
     Defeat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AchievementId {
-    FirstFoothold,
-    FirstRoot,
-    FirstLoot,
-    FirstPivot,
-    StealthOperation,
-    CampaignComplete,
-}
-
-impl AchievementId {
-    pub fn title_in(&self, language: Language) -> &'static str {
-        match (language, self) {
-            (Language::Es, AchievementId::FirstFoothold) => "Punto de apoyo",
-            (Language::Es, AchievementId::FirstRoot) => "Root local",
-            (Language::Es, AchievementId::FirstLoot) => "Manos en el botín",
-            (Language::Es, AchievementId::FirstPivot) => "Movimiento lateral",
-            (Language::Es, AchievementId::StealthOperation) => "Operación limpia",
-            (Language::Es, AchievementId::CampaignComplete) => "Caso cerrado",
-            (Language::En, AchievementId::FirstFoothold) => "Foothold",
-            (Language::En, AchievementId::FirstRoot) => "Local root",
-            (Language::En, AchievementId::FirstLoot) => "Hands on loot",
-            (Language::En, AchievementId::FirstPivot) => "Lateral movement",
-            (Language::En, AchievementId::StealthOperation) => "Clean operation",
-            (Language::En, AchievementId::CampaignComplete) => "Case closed",
-        }
-    }
-
-    pub fn description_in(&self, language: Language) -> &'static str {
-        match (language, self) {
-            (Language::Es, AchievementId::FirstFoothold) => "Consigue tu primera shell de usuario.",
-            (Language::Es, AchievementId::FirstRoot) => {
-                "Escala privilegios a root por primera vez."
-            }
-            (Language::Es, AchievementId::FirstLoot) => "Recoge tu primer botín útil.",
-            (Language::Es, AchievementId::FirstPivot) => "Pivota a otro host de una red interna.",
-            (Language::Es, AchievementId::StealthOperation) => {
-                "Completa una operación con menos del 25% de traza."
-            }
-            (Language::Es, AchievementId::CampaignComplete) => "Completa la campaña.",
-            (Language::En, AchievementId::FirstFoothold) => "Get your first user shell.",
-            (Language::En, AchievementId::FirstRoot) => {
-                "Escalate privileges to root for the first time."
-            }
-            (Language::En, AchievementId::FirstLoot) => "Collect your first useful loot.",
-            (Language::En, AchievementId::FirstPivot) => {
-                "Pivot to another host in an internal network."
-            }
-            (Language::En, AchievementId::StealthOperation) => {
-                "Complete an operation with less than 25% trace."
-            }
-            (Language::En, AchievementId::CampaignComplete) => "Complete the campaign.",
-        }
-    }
-
-    pub fn title(&self) -> &'static str {
-        self.title_in(Language::Es)
-    }
-
-    pub fn description(&self) -> &'static str {
-        self.description_in(Language::Es)
-    }
-}
-
-pub const ACHIEVEMENTS: &[AchievementId] = &[
-    AchievementId::FirstFoothold,
-    AchievementId::FirstRoot,
-    AchievementId::FirstLoot,
-    AchievementId::FirstPivot,
-    AchievementId::StealthOperation,
-    AchievementId::CampaignComplete,
-];
-
-/// Fases de la kill chain. El orden de declaración define la progresión.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Recon,
-    Enum,
-    Exploit,
-    Post,
-}
-
-impl Phase {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Phase::Recon => "RECON",
-            Phase::Enum => "ENUM",
-            Phase::Exploit => "EXPLOIT",
-            Phase::Post => "POST",
-        }
-    }
-
-    fn rank(&self) -> u8 {
-        match self {
-            Phase::Recon => 0,
-            Phase::Enum => 1,
-            Phase::Exploit => 2,
-            Phase::Post => 3,
-        }
-    }
-
-    pub fn is_post(&self) -> bool {
-        matches!(self, Phase::Post)
-    }
-}
-
 pub struct GameState {
     // ----- Definición -----
     pub campaign: Campaign,
@@ -306,7 +209,9 @@ pub struct GameState {
     pub active: usize,
 
     // ----- Runtime del nivel (del host ACTIVO) -----
-    pub phase: Phase,
+    /// Etapa de progresión actual, como índice en `campaign.stages`. El dominio
+    /// pentest la interpreta como su `Phase` (ver `phase()`).
+    pub stage: usize,
     /// Solo para entradas `Pivot`: ¿se ha establecido ya el túnel (`connect`)?
     pub pivoted: bool,
     /// Nº de encubrimientos (`cleanup`) hechos en este nivel (riesgo creciente).
@@ -316,7 +221,7 @@ pub struct GameState {
     /// Puertos ya descubiertos por reconocimiento.
     pub discovered_ports: Vec<u16>,
     pub intel: Vec<IntelFinding>,
-    pub detection: DetectionState,
+    pub detection: Meter,
     pub clock: u32,
     pub next_id: usize,
     /// ¿Se ha conseguido acceso root en este nivel (vía privesc)?
@@ -362,11 +267,9 @@ pub struct GameState {
     /// Flags persistentes de campaña, activadas por comandos declarativos
     /// (`SetFlag`). Persisten entre niveles y en el guardado.
     pub flags: Vec<String>,
-    /// Overrides de entorno de la sesión (`export VAR=valor`). No se persisten y
-    /// se reinician al cambiar de nivel (dejas la caja anterior).
-    pub env_session: Vec<(String, String)>,
-    /// Código de salida del último comando de shell (`$?`). No se persiste.
-    pub last_exit: i32,
+    /// Estado de runtime domain-agnóstico (sesión de shell, medidores de
+    /// campaña...). Núcleo naciente de la separación núcleo/dominio (sub-paso 5).
+    pub core: CoreState,
 }
 
 impl GameState {
@@ -392,13 +295,13 @@ impl GameState {
             entry: EntryVector::Active,
             hosts: Vec::new(),
             active: 0,
-            phase: Phase::Recon,
+            stage: 0,
             pivoted: false,
             cleanups_done: 0,
             awaiting_choice: false,
             discovered_ports: Vec::new(),
             intel: Vec::new(),
-            detection: DetectionState::new(),
+            detection: Meter::new(),
             clock: 0,
             next_id: 1,
             is_root: false,
@@ -420,8 +323,7 @@ impl GameState {
             achievements: Vec::new(),
             campaign_achievements: Vec::new(),
             flags: Vec::new(),
-            env_session: Vec::new(),
-            last_exit: 0,
+            core: CoreState::new(),
         };
 
         // Carga la primera operación (construye sus hosts y siembra la entrada).
@@ -460,12 +362,49 @@ impl GameState {
         (self.base_skill + self.extra_skill).clamp(0.0, 0.95)
     }
 
+    // --- Etapas de progresión (API genérica del núcleo) ---
+
+    /// ¿La etapa actual es al menos la de índice `rank`?
+    pub fn stage_at_least(&self, rank: usize) -> bool {
+        self.stage >= rank
+    }
+
+    /// Etiqueta de la etapa actual (de `campaign.stages`).
+    pub fn stage_label(&self) -> &str {
+        self.stage_label_at(self.stage)
+    }
+
+    /// Etiqueta de la etapa de índice `rank` (vacía si está fuera de rango).
+    pub fn stage_label_at(&self, rank: usize) -> &str {
+        self.campaign
+            .stages
+            .get(rank)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// Índice de la etapa cuyo nombre coincide (sin distinguir mayúsculas).
+    pub fn stage_index_of(&self, name: &str) -> Option<usize> {
+        self.campaign
+            .stages
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(name))
+    }
+
+    // --- Vista tipada del dominio pentest (transitorio: se reubica en el
+    // sub-paso 5, cuando GameState se parta en núcleo + estado de dominio) ---
+
+    /// Etapa actual interpretada como fase de la kill chain.
+    pub fn phase(&self) -> Phase {
+        Phase::from_rank(self.stage)
+    }
+
     pub fn phase_at_least(&self, p: Phase) -> bool {
-        self.phase.rank() >= p.rank()
+        self.stage_at_least(p.rank())
     }
 
     pub fn has_foothold(&self) -> bool {
-        self.phase_at_least(Phase::Post)
+        self.stage_at_least(Phase::Post.rank())
     }
 
     pub fn is_port_discovered(&self, port: u16) -> bool {
@@ -676,9 +615,11 @@ impl GameState {
         // sistema sube la traza poco a poco (penaliza demorarse). En POST, con
         // shell ya conseguida, la exploración del VFS es gratis.
         if !self.has_foothold() {
-            self.detection.add_dwell(ticks as f32 * balance::DWELL_RATE);
+            self.detection.add_passive(ticks as f32 * balance::DWELL_RATE);
         }
+        self.apply_meter_drift(ticks);
         self.check_time();
+        self.check_meters();
     }
 
     /// Ticks restantes de la ventana de la operación (`None` = sin límite).
@@ -699,12 +640,90 @@ impl GameState {
         }
     }
 
-    /// Avanza la fase si la nueva es posterior (nunca retrocede).
-    pub fn reach_phase(&mut self, p: Phase) {
-        if p.rank() > self.phase.rank() {
-            self.phase = p;
-            self.log(self.text().phase_reached(p.label()));
+    // ---------- Medidores de campaña (genéricos) ----------
+
+    /// Valor vivo de un medidor de campaña por su id.
+    pub fn meter(&self, id: &str) -> Option<&Meter> {
+        self.core.meters.get(id)
+    }
+
+    /// Modifica un medidor de campaña (positivo suma, negativo resta) y evalúa su
+    /// `on_limit`. No hace nada si el id no existe.
+    pub fn add_meter(&mut self, id: &str, delta: f32) {
+        match self.core.meters.get_mut(id) {
+            Some(m) => {
+                if delta >= 0.0 {
+                    m.add_passive(delta);
+                } else {
+                    m.reduce(-delta);
+                }
+            }
+            None => return,
         }
+        self.check_meters();
+    }
+
+    /// Aplica la deriva por tiempo (`per_tick`) de cada medidor de campaña.
+    fn apply_meter_drift(&mut self, ticks: u32) {
+        for i in 0..self.core.meter_defs.len() {
+            let per = self.core.meter_defs[i].per_tick;
+            if per == 0.0 {
+                continue;
+            }
+            let id = self.core.meter_defs[i].id.clone();
+            let delta = per * ticks as f32;
+            if let Some(m) = self.core.meters.get_mut(&id) {
+                if delta >= 0.0 {
+                    m.add_passive(delta);
+                } else {
+                    m.reduce(-delta);
+                }
+            }
+        }
+    }
+
+    /// Evalúa los medidores de campaña: si alguno cruza su umbral con `Fail`
+    /// pierde el nivel; con `Win` lo completa. `None` no tiene efecto.
+    fn check_meters(&mut self) {
+        if self.outcome.is_some() {
+            return;
+        }
+        let mut failed: Option<String> = None;
+        let mut won = false;
+        for def in &self.core.meter_defs {
+            if let Some(m) = self.core.meters.get(&def.id) {
+                if def.triggered(m.value) {
+                    match def.on_limit {
+                        OnLimit::Fail => {
+                            failed = Some(def.label().to_string());
+                            break;
+                        }
+                        OnLimit::Win => won = true,
+                        OnLimit::None => {}
+                    }
+                }
+            }
+        }
+        if let Some(label) = failed {
+            self.outcome = Some(GameOutcome::Defeat);
+            self.log(format!("!! {label} en el límite — OPERACIÓN FALLIDA."));
+        } else if won {
+            self.complete_level();
+        }
+    }
+
+    /// Avanza a la etapa `rank` si es posterior a la actual (nunca retrocede).
+    pub fn reach_stage(&mut self, rank: usize) {
+        if rank > self.stage {
+            self.stage = rank;
+            let label = self.stage_label_at(rank).to_string();
+            self.log(self.text().phase_reached(&label));
+        }
+    }
+
+    /// Avanza la fase de la kill chain (envoltorio pentest de `reach_stage`).
+    pub fn reach_phase(&mut self, p: Phase) {
+        self.reach_stage(p.rank());
     }
 
     pub fn discover_port(&mut self, port: u16) -> bool {
@@ -793,7 +812,7 @@ impl GameState {
                 .to_string();
             self.log(msg);
             if response_noise > 0.0 {
-                self.detection.add_noise(response_noise);
+                self.detection.add(response_noise);
             }
         }
     }
@@ -815,15 +834,22 @@ impl GameState {
         self.entry = m.entry.clone();
 
         // Runtime de nivel (global al nivel, no por host).
-        self.detection = DetectionState::new();
+        self.detection = Meter::new();
+        // Medidores de campaña del nivel: se arrancan en su valor inicial.
+        self.core.meter_defs = m.meters.clone();
+        self.core.meters = m
+            .meters
+            .iter()
+            .map(|d| (d.id.clone(), Meter::starting(d.start)))
+            .collect();
         self.clock = 0;
         self.cleanups_done = 0;
         self.pivoted = false;
         self.awaiting_choice = false;
         self.epilogue = None;
         // El entorno de sesión y el último código de salida son del host actual.
-        self.env_session.clear();
-        self.last_exit = 0;
+        self.core.env_session.clear();
+        self.core.last_exit = 0;
 
         // Construye los hosts del nivel y carga el de entrada en los campos vivos.
         self.build_hosts(&m);
@@ -863,7 +889,7 @@ impl GameState {
         let a = self.active;
         self.target = self.hosts[a].def.clone();
         self.objective = self.hosts[a].objective.clone();
-        self.phase = self.hosts[a].phase;
+        self.stage = self.hosts[a].stage;
         self.discovered_ports = std::mem::take(&mut self.hosts[a].discovered_ports);
         self.intel = std::mem::take(&mut self.hosts[a].intel);
         self.next_id = self.hosts[a].next_id;
@@ -878,7 +904,7 @@ impl GameState {
     /// Guarda el runtime vivo en el slot del host activo (antes de pivotar).
     fn snapshot_active(&mut self) {
         let a = self.active;
-        self.hosts[a].phase = self.phase;
+        self.hosts[a].stage = self.stage;
         self.hosts[a].discovered_ports = std::mem::take(&mut self.discovered_ports);
         self.hosts[a].intel = std::mem::take(&mut self.intel);
         self.hosts[a].next_id = self.next_id;
@@ -937,10 +963,11 @@ impl GameState {
             .enumerate()
             .map(|(i, h)| {
                 let active = i == self.active;
+                let post = Phase::Post.rank();
                 let compromised = if active {
-                    self.phase.is_post()
+                    self.stage_at_least(post)
                 } else {
-                    h.phase.is_post()
+                    h.stage >= post
                 };
                 let mark = if active {
                     '*'
@@ -973,7 +1000,7 @@ impl GameState {
                 }
             }
             if !self.discovered_ports.is_empty() {
-                self.phase = Phase::Enum;
+                self.stage = Phase::Enum.rank();
             }
         }
     }
@@ -1031,7 +1058,7 @@ impl GameState {
         self.last_summary = Some(self.text().level_summary(
             self.level_number(),
             &g,
-            self.detection.detection,
+            self.detection.value,
             self.detection_limit,
             self.clock,
         ));

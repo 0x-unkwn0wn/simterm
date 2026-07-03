@@ -91,7 +91,7 @@ fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(AMBER),
         ),
         Span::styled(
-            format!("[fase {}] ", g.phase.label()),
+            format!("[fase {}] ", g.stage_label()),
             Style::default().fg(AMBER_HI).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -155,7 +155,7 @@ fn draw_target(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(vec![
         Span::styled("fase    ", Style::default().fg(AMBER_DIM)),
         Span::styled(
-            app.game.phase.label(),
+            app.game.stage_label(),
             Style::default().fg(AMBER_HI).add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -270,7 +270,7 @@ fn draw_detection(frame: &mut Frame, area: Rect, app: &App) {
         .ratio(ratio as f64)
         .label(format!(
             "{:.0} / {:.0}",
-            app.game.detection.detection, limit
+            app.game.detection.value, limit
         ));
     frame.render_widget(gauge, area);
 }

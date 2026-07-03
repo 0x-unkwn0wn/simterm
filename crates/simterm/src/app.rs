@@ -585,11 +585,11 @@ impl App {
                 for line in out.lines {
                     self.game.log(line);
                 }
-                self.game.last_exit = out.exit;
+                self.game.core.last_exit = out.exit;
             }
             None => {
                 self.game.log(format!("bash: {verb}: command not found"));
-                self.game.last_exit = 127;
+                self.game.core.last_exit = 127;
             }
         }
     }
@@ -608,6 +608,6 @@ impl App {
             return;
         }
         self.game.log(format!("bash: {verb}: command not found"));
-        self.game.last_exit = 127;
+        self.game.core.last_exit = 127;
     }
 }
