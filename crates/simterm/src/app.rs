@@ -146,11 +146,11 @@ impl App {
         let m = &self.game.campaign.missions[idx];
         // En el cierre de campaña con elección, el overlay muestra el epílogo
         // escogido en vez del debrief estándar.
-        let mut lines = match (final_op, &self.game.epilogue) {
+        let mut lines = match (final_op, &self.game.core.epilogue) {
             (true, Some(epi)) => epi.clone(),
             _ => m.debrief.clone(),
         };
-        if let Some(summary) = &self.game.last_summary {
+        if let Some(summary) = &self.game.core.last_summary {
             lines.push(String::new());
             lines.push(summary.clone());
         }

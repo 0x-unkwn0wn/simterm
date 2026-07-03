@@ -216,8 +216,6 @@ pub struct GameState {
     pub pivoted: bool,
     /// Nº de encubrimientos (`cleanup`) hechos en este nivel (riesgo creciente).
     pub cleanups_done: u32,
-    /// Operación con final con elección: ¿esperando la decisión del jugador?
-    pub awaiting_choice: bool,
     /// Puertos ya descubiertos por reconocimiento.
     pub discovered_ports: Vec<u16>,
     pub intel: Vec<IntelFinding>,
@@ -254,21 +252,11 @@ pub struct GameState {
     pub running: bool,
     /// Desenlace de la *campaña*: solo se fija al perder o al completarla.
     pub outcome: Option<GameOutcome>,
-    /// Reloj acumulado de toda la campaña (para el resumen final).
-    pub campaign_clock: u32,
-    /// Resumen del último nivel cerrado (se muestra en el debrief).
-    pub last_summary: Option<String>,
-    /// Epílogo elegido en el final con elección (se muestra en el cierre).
-    pub epilogue: Option<Vec<String>>,
     /// Logros desbloqueados durante esta campaña.
     pub achievements: Vec<AchievementId>,
-    /// Logros data-driven de campaña desbloqueados.
-    pub campaign_achievements: Vec<String>,
-    /// Flags persistentes de campaña, activadas por comandos declarativos
-    /// (`SetFlag`). Persisten entre niveles y en el guardado.
-    pub flags: Vec<String>,
-    /// Estado de runtime domain-agnóstico (sesión de shell, medidores de
-    /// campaña...). Núcleo naciente de la separación núcleo/dominio (sub-paso 5).
+    /// Estado de runtime domain-agnóstico (sesión de shell, medidores de campaña,
+    /// bookkeeping persistente...). Núcleo naciente de la separación
+    /// núcleo/dominio (sub-paso 5).
     pub core: CoreState,
 }
 
@@ -298,7 +286,6 @@ impl GameState {
             stage: 0,
             pivoted: false,
             cleanups_done: 0,
-            awaiting_choice: false,
             discovered_ports: Vec::new(),
             intel: Vec::new(),
             detection: Meter::new(),
@@ -317,12 +304,7 @@ impl GameState {
             logs: Vec::new(),
             running: true,
             outcome: None,
-            campaign_clock: 0,
-            last_summary: None,
-            epilogue: None,
             achievements: Vec::new(),
-            campaign_achievements: Vec::new(),
-            flags: Vec::new(),
             core: CoreState::new(),
         };
 
@@ -506,7 +488,7 @@ impl GameState {
 
     /// ¿Está activa la flag de campaña indicada?
     pub fn has_flag(&self, name: &str) -> bool {
-        self.flags.iter().any(|f| f == name)
+        self.core.flags.iter().any(|f| f == name)
     }
 
     /// Activa una flag de campaña. Devuelve `true` si era nueva.
@@ -514,14 +496,14 @@ impl GameState {
         if self.has_flag(name) {
             return false;
         }
-        self.flags.push(name.to_string());
+        self.core.flags.push(name.to_string());
         true
     }
 
     /// Desactiva una flag de campaña. Devuelve `true` si existía.
     pub fn clear_flag(&mut self, name: &str) -> bool {
-        if let Some(i) = self.flags.iter().position(|f| f == name) {
-            self.flags.remove(i);
+        if let Some(i) = self.core.flags.iter().position(|f| f == name) {
+            self.core.flags.remove(i);
             true
         } else {
             false
@@ -540,7 +522,7 @@ impl GameState {
     }
 
     pub fn unlock_campaign_achievement(&mut self, id: &str) -> bool {
-        if self.campaign_achievements.iter().any(|got| got == id) {
+        if self.core.campaign_achievements.iter().any(|got| got == id) {
             return false;
         }
         let Some(achievement) = self
@@ -552,7 +534,7 @@ impl GameState {
         else {
             return false;
         };
-        self.campaign_achievements.push(id.to_string());
+        self.core.campaign_achievements.push(id.to_string());
         self.log(self.text().achievement_unlocked(&achievement.title));
         if !achievement.description.is_empty() {
             self.log(format!("   {}", achievement.description));
@@ -567,7 +549,7 @@ impl GameState {
         self.campaign
             .achievements
             .iter()
-            .filter(|a| !self.campaign_achievements.iter().any(|got| got == &a.id))
+            .filter(|a| !self.core.campaign_achievements.iter().any(|got| got == &a.id))
             .filter(|a| predicate(&a.trigger))
             .cloned()
             .collect()
@@ -845,8 +827,8 @@ impl GameState {
         self.clock = 0;
         self.cleanups_done = 0;
         self.pivoted = false;
-        self.awaiting_choice = false;
-        self.epilogue = None;
+        self.core.awaiting_choice = false;
+        self.core.epilogue = None;
         // El entorno de sesión y el último código de salida son del host actual.
         self.core.env_session.clear();
         self.core.last_exit = 0;
@@ -1043,7 +1025,7 @@ impl GameState {
     /// Nivel superado (tras privesc): avanza al siguiente, abre la decisión
     /// final o gana la campaña.
     pub fn complete_level(&mut self) {
-        if self.outcome.is_some() || self.awaiting_choice {
+        if self.outcome.is_some() || self.core.awaiting_choice {
             return;
         }
         self.log(String::from(self.text().level_completed()));
@@ -1055,14 +1037,14 @@ impl GameState {
         let stealth_unlocked =
             ratio < 0.25 && self.unlock_achievement(AchievementId::StealthOperation);
         let g = self.campaign.theme.grade(ratio).to_string();
-        self.last_summary = Some(self.text().level_summary(
+        self.core.last_summary = Some(self.text().level_summary(
             self.level_number(),
             &g,
             self.detection.value,
             self.detection_limit,
             self.clock,
         ));
-        self.campaign_clock += self.clock;
+        self.core.campaign_clock += self.clock;
 
         // Debrief (lore de cierre) de la misión recién superada.
         let debrief = self.campaign.missions[self.level_index].debrief.clone();
@@ -1096,7 +1078,7 @@ impl GameState {
         if endings.is_empty() {
             self.finalize_victory();
         } else {
-            self.awaiting_choice = true;
+            self.core.awaiting_choice = true;
             self.log(String::from(self.text().final_choice_prompt()));
             for (i, e) in endings.iter().enumerate() {
                 self.log(format!("  {}. {}", i + 1, e.title));
@@ -1107,7 +1089,7 @@ impl GameState {
 
     /// Resuelve el final con elección: muestra el epílogo y cierra la campaña.
     pub fn resolve_ending(&mut self, choice: usize) {
-        if !self.awaiting_choice {
+        if !self.core.awaiting_choice {
             self.log(String::from(self.text().no_pending_choice()));
             return;
         }
@@ -1120,7 +1102,7 @@ impl GameState {
             }
         };
 
-        self.awaiting_choice = false;
+        self.core.awaiting_choice = false;
         self.log(format!("// {} //", e.title));
         for line in &e.lines {
             self.log(line.clone());
@@ -1130,7 +1112,7 @@ impl GameState {
         // El epílogo se muestra también en el overlay de cierre de campaña.
         let mut epi = vec![e.title.clone(), String::new()];
         epi.extend(e.lines.clone());
-        self.epilogue = Some(epi);
+        self.core.epilogue = Some(epi);
 
         self.finalize_victory();
     }
@@ -1144,7 +1126,7 @@ impl GameState {
         self.log(String::from(self.text().campaign_completed()));
         self.log(
             self.text()
-                .campaign_summary(self.level_count(), self.campaign_clock),
+                .campaign_summary(self.level_count(), self.core.campaign_clock),
         );
     }
 
@@ -1159,12 +1141,12 @@ impl GameState {
             level_index: self.level_index,
             extra_skill: self.extra_skill,
             creds: self.creds.clone(),
-            campaign_clock: self.campaign_clock,
+            campaign_clock: self.core.campaign_clock,
             foothold_tokens: self.foothold_tokens.clone(),
             has_wordlist: self.has_wordlist,
             achievements: self.achievements.clone(),
-            campaign_achievements: self.campaign_achievements.clone(),
-            flags: self.flags.clone(),
+            campaign_achievements: self.core.campaign_achievements.clone(),
+            flags: self.core.flags.clone(),
         };
         if let Ok(text) = ron::ser::to_string(&data) {
             let _ = std::fs::write(SAVE_PATH, text); // best-effort
@@ -1196,12 +1178,12 @@ impl GameState {
             {
                 self.extra_skill = sd.extra_skill;
                 self.creds = sd.creds;
-                self.campaign_clock = sd.campaign_clock;
+                self.core.campaign_clock = sd.campaign_clock;
                 self.foothold_tokens = sd.foothold_tokens;
                 self.has_wordlist = sd.has_wordlist;
                 self.achievements = sd.achievements;
-                self.campaign_achievements = sd.campaign_achievements;
-                self.flags = sd.flags;
+                self.core.campaign_achievements = sd.campaign_achievements;
+                self.core.flags = sd.flags;
                 self.apply_mission(sd.level_index);
                 self.logs.clear();
                 self.log(format!("=== {} ===", self.campaign.name));
@@ -1220,10 +1202,10 @@ impl GameState {
         self.has_wordlist = false;
         self.foothold_tokens.clear();
         self.achievements.clear();
-        self.campaign_achievements.clear();
-        self.flags.clear();
-        self.campaign_clock = 0;
-        self.last_summary = None;
+        self.core.campaign_achievements.clear();
+        self.core.flags.clear();
+        self.core.campaign_clock = 0;
+        self.core.last_summary = None;
         self.outcome = None;
         self.running = true;
         self.apply_mission(0);

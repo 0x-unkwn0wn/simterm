@@ -104,7 +104,7 @@ fn decide(game: &GameState, mode: AutoplayMode, inspected: &mut HashSet<String>)
         None => {}
     }
 
-    if game.awaiting_choice {
+    if game.core.awaiting_choice {
         // El guion original elige el desenlace 3 (la campaña oficial tiene 3+
         // finales). Se acota al nº de finales para no colgarse en campañas con
         // menos: en la oficial sigue siendo exactamente `choose 3`.

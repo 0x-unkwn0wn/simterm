@@ -26,6 +26,23 @@ pub struct CoreState {
     pub env_session: Vec<(String, String)>,
     /// Código de salida del último comando de shell (`$?`). No se persiste.
     pub last_exit: i32,
+
+    // ----- Bookkeeping persistente de campaña (se guarda entre sesiones) -----
+    /// Reloj acumulado de toda la campaña (para el resumen final).
+    pub campaign_clock: u32,
+    /// Logros data-driven de campaña desbloqueados (por id).
+    pub campaign_achievements: Vec<String>,
+    /// Flags persistentes de campaña, activadas por comandos declarativos
+    /// (`SetFlag`). Persisten entre niveles y en el guardado.
+    pub flags: Vec<String>,
+
+    // ----- Flujo de cierre de nivel / final con elección -----
+    /// Resumen del último nivel cerrado (se muestra en el debrief).
+    pub last_summary: Option<String>,
+    /// Epílogo elegido en el final con elección (se muestra en el cierre).
+    pub epilogue: Option<Vec<String>>,
+    /// Operación con final con elección: ¿esperando la decisión del jugador?
+    pub awaiting_choice: bool,
 }
 
 impl CoreState {

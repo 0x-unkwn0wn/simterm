@@ -467,7 +467,7 @@ impl App {
 
     pub(super) fn cmd_achievements(&mut self) {
         let lang = self.game.campaign.language;
-        let unlocked = self.game.achievements.len() + self.game.campaign_achievements.len();
+        let unlocked = self.game.achievements.len() + self.game.core.campaign_achievements.len();
         let total = simterm_engine::ACHIEVEMENTS.len() + self.game.campaign.achievements.len();
         self.game
             .log(format!("--- LOGROS ({unlocked}/{total}) ---"));
@@ -496,6 +496,7 @@ impl App {
                 .map(|achievement| {
                     let mark = if self
                         .game
+                        .core
                         .campaign_achievements
                         .iter()
                         .any(|id| id == &achievement.id)
