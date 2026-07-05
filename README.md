@@ -99,8 +99,20 @@ log. Use `--autoplay-delay <ms>` to slow down or speed up the command cadence.
 
 ## Sample Experience Commands
 
-The bundled sample campaign demonstrates a terminal hacking experience. Its
-core command flow is:
+The bundled sample campaign runs in the **pentest domain** — the framework's
+one built-in domain with Rust mechanics; the core itself is domain-agnostic
+(see [Features](#features) and [Architecture](docs/ARCHITECTURE.md#domains)).
+The verbs below are *that domain's* command surface, not a fixed console
+command set. A campaign in another domain turns the kill-chain verbs off
+entirely: `nmap`, `exploit`, `privesc`, `intel`, `pivot` and the rest become
+`bash: x: command not found` and disappear from help and autocomplete. What
+stays is the neutral surface — session commands (`status`, `logs`, `logros`,
+`clear`, `reset`, `quit`, `help`), the emulated POSIX shell, and the virtual
+filesystem — plus whatever the campaign declares in data. See
+[`examples/demo_orbita`](examples/demo_orbita) for a non-hacking domain built
+with no pentest verbs at all.
+
+The pentest domain's core command flow is:
 
 - `target` - show the current target.
 - `nmap` - active reconnaissance.

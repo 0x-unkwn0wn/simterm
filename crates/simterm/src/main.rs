@@ -11,8 +11,12 @@ mod command;
 mod completion;
 mod effects;
 mod embedded;
+mod palette;
 mod registry;
 mod ui;
+
+#[cfg(test)]
+mod playthrough_test;
 
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
@@ -37,13 +41,14 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 const DEFAULT_CAMPAIGN: &str = "examples/sample_campaign";
 
 fn main() -> ExitCode {
-    let (path, mode, no_music, mut autoplay) = match parse_args() {
+    let (path, mode, no_music, mut autoplay, palette) = match parse_args() {
         Args::Run {
             path,
             mode,
             no_music,
             autoplay,
-        } => (path, mode, no_music, autoplay),
+            palette,
+        } => (path, mode, no_music, autoplay, palette),
         Args::Help => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -68,13 +73,6 @@ fn main() -> ExitCode {
         }
     };
     let campaign = loaded.campaign.clone();
-
-    // El autoplayer razona con la lógica de la kill chain (recon/exploit/...): no
-    // aplica a un dominio propio. Se desactiva silenciosamente en ese caso.
-    if autoplay.is_some() && !campaign.kill_chain() {
-        eprintln!("simterm: --autoplay solo está disponible en campañas de intrusión.");
-        autoplay = None;
-    }
 
     match mode {
         // Validación básica: confirma que la campaña carga y termina (sin TUI).
@@ -111,7 +109,7 @@ fn main() -> ExitCode {
                 let root = campaign_root(&path);
                 audio::Audio::try_new(root)
             };
-            if let Err(err) = run_game(campaign, audio, autoplay) {
+            if let Err(err) = run_game(campaign, audio, autoplay, palette) {
                 eprintln!("Error en la ejecución: {err}");
                 return ExitCode::FAILURE;
             }
@@ -220,6 +218,7 @@ enum Args {
         mode: Mode,
         no_music: bool,
         autoplay: Option<autoplay::AutoplayConfig>,
+        palette: palette::Palette,
     },
     Help,
 }
@@ -233,6 +232,7 @@ fn parse_args() -> Args {
     let mut mode = Mode::Play;
     let mut no_music = false;
     let mut autoplay: Option<autoplay::AutoplayConfig> = None;
+    let mut palette = palette::Palette::default();
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -240,6 +240,18 @@ fn parse_args() -> Args {
             "--check" => mode = Mode::Check,
             "--doctor" => mode = Mode::Doctor,
             "--no-music" | "--mute" => no_music = true,
+            "--appearance" | "--theme" => {
+                if let Some(name) = args.next() {
+                    match palette::Palette::by_name(&name) {
+                        Some(p) => palette = p,
+                        None => eprintln!(
+                            "simterm: aspecto '{name}' desconocido; usando '{}'. Opciones: {}.",
+                            palette.name,
+                            palette::Palette::names().join(", ")
+                        ),
+                    }
+                }
+            }
             "--autoplay" => autoplay = Some(autoplay::AutoplayConfig::default()),
             "--autoplay-deterministic" => autoplay = Some(autoplay::AutoplayConfig::strict()),
             "--autoplay-delay" => {
@@ -266,6 +278,7 @@ fn parse_args() -> Args {
         mode,
         no_music,
         autoplay,
+        palette,
     }
 }
 
@@ -280,6 +293,10 @@ fn print_usage() {
     println!("      --check             Valida que la campaña carga y termina (no abre la TUI)");
     println!("      --doctor            Validación semántica avanzada (errores/avisos; sale ≠0 si hay errores)");
     println!("      --no-music          Desactiva la música (por defecto suena '<campaña>/music/mission_N_theme.wav')");
+    println!(
+        "      --appearance <nombre>   Paleta de la interfaz: {} (por defecto 'amber'). También F2 en vivo",
+        palette::Palette::names().join(" | ")
+    );
     println!("      --autoplay          Juega la campaña automáticamente, visible paso a paso");
     println!("      --autoplay-deterministic");
     println!(
@@ -299,9 +316,10 @@ fn run_game(
     campaign: simterm_engine::Campaign,
     audio: Option<audio::Audio>,
     autoplay: Option<autoplay::AutoplayConfig>,
+    palette: palette::Palette,
 ) -> io::Result<()> {
     let mut terminal = setup_terminal()?;
-    let mut app = App::new(campaign, audio);
+    let mut app = App::new(campaign, audio, palette);
     if let Some(config) = autoplay {
         app.enable_autoplay(config);
     }

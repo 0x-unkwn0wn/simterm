@@ -124,6 +124,7 @@ impl Command {
                 | Command::Login
                 | Command::Privesc
                 | Command::Loot
+                | Command::Exfil(_)
                 | Command::John(_)
                 | Command::Strings(_)
                 | Command::Disasm(_)
@@ -271,6 +272,19 @@ pub fn parse(input: &str, pentest: bool) -> Command {
     cmd
 }
 
+/// Extrae los verbos (primer token de cada etapa) de una línea, dividiendo por
+/// tuberías `|` y descartando la cola de redirección (`> f`, `>> f`). Se usa para
+/// registrar el trabajo real del alumno (condiciones `RanCommand`): así una línea
+/// como `grep ERROR app.log | wc` cuenta tanto `grep` como `wc`.
+pub fn verbs_in_line(line: &str) -> Vec<String> {
+    // Descarta lo que va tras la primera redirección de salida.
+    let head = line.split('>').next().unwrap_or(line);
+    head.split('|')
+        .filter_map(|stage| stage.split_whitespace().next())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 /// Verbos de sistema emulados por el motor (`runtime::sysemu`). El parser los
 /// enruta a `Command::Shell`; el motor sintetiza su salida desde el estado.
 fn is_system_verb(verb: &str) -> bool {
@@ -291,6 +305,9 @@ fn is_system_verb(verb: &str) -> bool {
             | "head"
             | "tail"
             | "wc"
+            | "sort"
+            | "uniq"
+            | "nl"
             | "file"
     )
 }
@@ -333,10 +350,14 @@ mod tests {
         assert!(matches!(parse("exploit 1", false), Command::Unknown { .. }));
         // Una herramienta de enumeración (toolbox) también.
         assert!(matches!(parse("nikto 80", false), Command::Unknown { .. }));
+        // `exfil` y `loot` son mecánica pentest sobre el VFS: también se degradan.
+        assert!(matches!(parse("exfil /flag", false), Command::Unknown { .. }));
+        assert!(matches!(parse("loot", false), Command::Unknown { .. }));
 
         // Los verbos genéricos NO se degradan nunca.
         assert!(matches!(parse("help", false), Command::Help { .. }));
         assert!(matches!(parse("ls /x", false), Command::Ls(_)));
+        assert!(matches!(parse("cat /x", false), Command::Cat(_)));
         assert!(matches!(parse("echo hola", false), Command::Echo(_)));
     }
 }

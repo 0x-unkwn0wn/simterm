@@ -576,6 +576,37 @@ impl GameState {
         self.core.flags.iter().any(|f| f == name)
     }
 
+    /// Registra que el jugador ha ejecutado el verbo `verb` en el nivel actual
+    /// (para [`CommandCondition::RanCommand`]). Idempotente por verbo.
+    pub fn record_command(&mut self, verb: &str) {
+        let v = verb.to_lowercase();
+        if v.is_empty() {
+            return;
+        }
+        if !self.core.ran_commands.iter().any(|c| c == &v) {
+            self.core.ran_commands.push(v);
+        }
+    }
+
+    /// ¿Ha ejecutado el jugador el verbo `verb` en este nivel?
+    pub fn has_run_command(&self, verb: &str) -> bool {
+        let v = verb.to_lowercase();
+        self.core.ran_commands.iter().any(|c| c == &v)
+    }
+
+    /// Registra que el jugador ha leído la ruta `path` del VFS en este nivel
+    /// (para [`CommandCondition::FileRead`]). Idempotente por ruta.
+    pub fn record_read(&mut self, path: &str) {
+        if !self.core.read_paths.iter().any(|p| p == path) {
+            self.core.read_paths.push(path.to_string());
+        }
+    }
+
+    /// ¿Ha leído el jugador la ruta `path` en este nivel?
+    pub fn has_read(&self, path: &str) -> bool {
+        self.core.read_paths.iter().any(|p| p == path)
+    }
+
     /// Activa una flag de campaña. Devuelve `true` si era nueva.
     pub fn set_flag(&mut self, name: &str) -> bool {
         if self.has_flag(name) {
@@ -641,6 +672,9 @@ impl GameState {
     }
 
     pub fn unlock_campaign_read_file(&mut self, path: &str) {
+        // Toda lectura de fichero queda registrada para la verificación de
+        // trabajo real (`FileRead`), además de disparar logros `ReadFile`.
+        self.record_read(path);
         for achievement in self.matching_campaign_achievements(
             |trigger| matches!(trigger, CampaignAchievementTrigger::ReadFile(p) if p == path),
         ) {
@@ -916,6 +950,10 @@ impl GameState {
         // El entorno de sesión y el último código de salida son del host actual.
         self.core.env_session.clear();
         self.core.last_exit = 0;
+        // La verificación de trabajo real es por nivel: cada misión se demuestra
+        // ejecutando sus propios comandos y leyendo sus propios ficheros.
+        self.core.ran_commands.clear();
+        self.core.read_paths.clear();
 
         // Construye los hosts del nivel y carga el de entrada en los campos vivos.
         self.build_hosts(&m);

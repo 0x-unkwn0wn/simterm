@@ -326,6 +326,88 @@ pub fn file_hash(root: &[FsNode], comps: &[String]) -> Option<LootHash> {
     }
 }
 
+// ------------------------------ Escritura ------------------------------
+
+/// Resultado de intentar escribir un fichero (redirección `>` / `>>`).
+pub enum WriteOutcome {
+    /// Escrito correctamente.
+    Ok,
+    /// El directorio padre no existe (no se crean rutas intermedias).
+    NoParentDir,
+    /// La ruta apunta a un directorio existente.
+    IsDir,
+    /// La ruta apunta a un fichero especial (binario/codificado/root): no se
+    /// sobrescribe desde una redirección de laboratorio.
+    Protected,
+}
+
+/// Escribe `lines` en el fichero `comps` del VFS `root` (redirección de shell).
+/// Con `append`, añade al contenido existente (`>>`); sin él, lo sobrescribe
+/// (`>`). Crea el fichero si no existe, siempre que su directorio padre exista.
+/// No crea directorios intermedios (como una shell real sin `mkdir -p`).
+pub fn write_file(
+    root: &mut Vec<FsNode>,
+    comps: &[String],
+    lines: &[String],
+    append: bool,
+) -> WriteOutcome {
+    if comps.is_empty() {
+        return WriteOutcome::IsDir;
+    }
+    let (name, parent) = comps.split_last().unwrap();
+    // Localiza el vector de hijos del directorio padre.
+    let children = match children_mut(root, parent) {
+        Some(c) => c,
+        None => return WriteOutcome::NoParentDir,
+    };
+    // ¿Existe ya una entrada con ese nombre?
+    if let Some(node) = children.iter_mut().find(|n| n.name() == name) {
+        match node {
+            FsNode::Dir { .. } => WriteOutcome::IsDir,
+            FsNode::File {
+                content,
+                root: r,
+                binary,
+                encoding,
+                ..
+            } => {
+                if *r || binary.is_some() || encoding.is_some() {
+                    return WriteOutcome::Protected;
+                }
+                if !append {
+                    content.clear();
+                }
+                content.extend(lines.iter().cloned());
+                WriteOutcome::Ok
+            }
+        }
+    } else {
+        children.push(FsNode::File {
+            name: name.clone(),
+            content: lines.to_vec(),
+            root: false,
+            loot: None,
+            binary: None,
+            encoding: None,
+        });
+        WriteOutcome::Ok
+    }
+}
+
+/// Devuelve, en mutable, el vector de hijos del directorio en `comps`
+/// (`comps` vacío = raíz). `None` si algún componente no existe o no es directorio.
+fn children_mut<'a>(root: &'a mut Vec<FsNode>, comps: &[String]) -> Option<&'a mut Vec<FsNode>> {
+    let mut children = root;
+    for c in comps {
+        let idx = children.iter().position(|n| n.name() == c && n.is_dir())?;
+        match &mut children[idx] {
+            FsNode::Dir { children: ch, .. } => children = ch,
+            FsNode::File { .. } => return None,
+        }
+    }
+    Some(children)
+}
+
 // ------------------------------ Codificación ------------------------------
 
 const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

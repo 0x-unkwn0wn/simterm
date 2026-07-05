@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use simterm_engine::filesystem::{self, FsNode, Reward};
+use simterm_engine::model::command::{CampaignCommand, CommandCondition, CommandEffect};
 use simterm_engine::model::target::{ExploitReliability, Vulnerability};
 use simterm_engine::{toolbox, EntryVector, FindingStatus, GameOutcome, GameState, ServiceCat};
 
@@ -60,6 +61,12 @@ pub struct Autoplay {
     /// Binarios ya inspeccionados con `strings` en esta sesión (frontend-only:
     /// el motor no lo rastrea). Evita repetir `strings` antes de `solve`.
     inspected: HashSet<String>,
+    /// Cursor del guion genérico por misión (`Mission.autoplay`).
+    bare_script_step: usize,
+    /// Nivel al que pertenecen los cursores genéricos.
+    bare_level_index: usize,
+    /// Comandos declarativos ya probados por el solver Bare en el nivel actual.
+    bare_done: HashSet<String>,
 }
 
 impl Autoplay {
@@ -69,6 +76,9 @@ impl Autoplay {
             last_step: None,
             stopped: false,
             inspected: HashSet::new(),
+            bare_script_step: 0,
+            bare_level_index: 0,
+            bare_done: HashSet::new(),
         }
     }
 
@@ -83,7 +93,17 @@ impl Autoplay {
             return None;
         }
 
-        let Decision::Command(cmd) = decide(game, self.config.mode, &mut self.inspected)?;
+        if self.bare_level_index != game.level_index {
+            self.bare_level_index = game.level_index;
+            self.bare_script_step = 0;
+            self.bare_done.clear();
+        }
+
+        let Decision::Command(cmd) = if game.campaign.kill_chain() {
+            decide(game, self.config.mode, &mut self.inspected)?
+        } else {
+            decide_bare(game, &mut self.bare_script_step, &mut self.bare_done)?
+        };
         self.last_step = Some(now);
         Some(cmd)
     }
@@ -95,6 +115,98 @@ enum Decision {
 
 fn command(cmd: impl Into<String>) -> Option<Decision> {
     Some(Decision::Command(cmd.into()))
+}
+
+fn decide_bare(
+    game: &GameState,
+    script_step: &mut usize,
+    done: &mut HashSet<String>,
+) -> Option<Decision> {
+    match game.core.outcome {
+        Some(GameOutcome::Victory) => return command("quit"),
+        Some(GameOutcome::Defeat) => return None,
+        None => {}
+    }
+
+    if game.core.awaiting_choice {
+        return command("choose 1");
+    }
+
+    let mission = &game.campaign.missions[game.level_index];
+    if let Some(line) = mission.autoplay.get(*script_step) {
+        *script_step += 1;
+        return command(line.clone());
+    }
+
+    let mut candidates: Vec<(usize, usize, String, String)> = game
+        .campaign
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(_, cmd)| bare_command_available(game, cmd))
+        .filter(|(_, cmd)| bare_command_changes_state(cmd))
+        .filter_map(|(idx, cmd)| {
+            let trigger = cmd.triggers.first()?.clone();
+            let key = format!("{}:{trigger}", game.level_index);
+            if done.contains(&key) {
+                return None;
+            }
+            Some((bare_command_priority(cmd), idx, key, trigger))
+        })
+        .collect();
+
+    candidates.sort_by_key(|(priority, idx, _, _)| (*priority, *idx));
+    let Some((_, _, key, trigger)) = candidates.into_iter().next() else {
+        return None;
+    };
+    done.insert(key);
+    command(trigger)
+}
+
+fn bare_command_available(game: &GameState, cmd: &CampaignCommand) -> bool {
+    let mission_id = &game.campaign.missions[game.level_index].id;
+    cmd.conditions.iter().all(|c| match c {
+        CommandCondition::FlagSet(f) => game.has_flag(f),
+        CommandCondition::FlagNotSet(f) => !game.has_flag(f),
+        CommandCondition::Mission(m) => m == mission_id,
+        CommandCondition::Phase(p) => game
+            .stage_index_of(p)
+            .is_some_and(|idx| game.stage_at_least(idx)),
+        CommandCondition::FileRead(path) => game.has_read(path),
+        CommandCondition::RanCommand(verb) => game.has_run_command(verb),
+    })
+}
+
+fn bare_command_changes_state(cmd: &CampaignCommand) -> bool {
+    cmd.effects.iter().any(|e| match e {
+        CommandEffect::AddLog(_) => false,
+        CommandEffect::AddTrace(amount) => *amount != 0.0,
+        _ => true,
+    })
+}
+
+fn bare_command_priority(cmd: &CampaignCommand) -> usize {
+    if cmd
+        .effects
+        .iter()
+        .any(|e| matches!(e, CommandEffect::CompleteMission))
+    {
+        30
+    } else if cmd
+        .effects
+        .iter()
+        .any(|e| matches!(e, CommandEffect::AddMeter(_, _)))
+    {
+        20
+    } else if cmd
+        .effects
+        .iter()
+        .any(|e| matches!(e, CommandEffect::ReachStage(_) | CommandEffect::SetFlag(_)))
+    {
+        10
+    } else {
+        40
+    }
 }
 
 fn decide(game: &GameState, mode: AutoplayMode, inspected: &mut HashSet<String>) -> Option<Decision> {
@@ -510,6 +622,21 @@ mod tests {
         true
     }
 
+    fn run_bare(game: &mut GameState, line: &str) -> bool {
+        match command::parse(line, false) {
+            Command::Unknown { verb, .. } => {
+                assert!(
+                    actions::campaign_command(game, &verb),
+                    "comando Bare no manejado: {line}"
+                );
+            }
+            Command::Choose(Some(c)) if c >= 1 => game.resolve_ending(c - 1),
+            Command::Quit => return false,
+            other => panic!("autoplay Bare emitió un comando no soportado desde '{line}': {other:?}"),
+        }
+        true
+    }
+
     #[test]
     fn decision_pura_es_determinista() {
         let campaign = load_campaign(sample_campaign_path()).expect("la campaña de ejemplo carga");
@@ -555,6 +682,42 @@ mod tests {
         assert!(
             commands.len() >= 5,
             "el autoplay apenas avanzó: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn autoplay_bare_infiere_comandos_declarativos_y_termina() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("demo_orbita");
+        let campaign = load_campaign(path).expect("la campaña Bare carga");
+        let mut game = GameState::new(campaign);
+        let mut script_step = 0;
+        let mut done = HashSet::new();
+
+        let mut commands = Vec::new();
+        let mut terminated = false;
+        for _ in 0..40 {
+            let Some(Decision::Command(cmd)) = decide_bare(&game, &mut script_step, &mut done)
+            else {
+                terminated = true;
+                break;
+            };
+            let keep_going = run_bare(&mut game, &cmd);
+            commands.push(cmd);
+            if !keep_going || game.core.outcome.is_some() {
+                terminated = true;
+                break;
+            }
+        }
+
+        assert!(terminated, "el autoplay Bare no terminó: {commands:?}");
+        assert_eq!(game.core.outcome, Some(GameOutcome::Victory));
+        assert!(
+            commands.iter().any(|c| c == "transmitir"),
+            "no llegó al comando de victoria: {commands:?}"
         );
     }
 }

@@ -20,11 +20,11 @@ pub struct ShellOutput {
 }
 
 impl ShellOutput {
-    fn ok(lines: Vec<String>) -> Self {
+    pub(crate) fn ok(lines: Vec<String>) -> Self {
         ShellOutput { lines, exit: 0 }
     }
 
-    fn code(lines: Vec<String>, exit: i32) -> Self {
+    pub(crate) fn code(lines: Vec<String>, exit: i32) -> Self {
         ShellOutput { lines, exit }
     }
 
@@ -342,7 +342,7 @@ fn export_cmd(state: &mut GameState, args: &[String]) -> ShellOutput {
 
 /// Lee el contenido en claro de un fichero del VFS, respetando permisos de root.
 /// Devuelve `Err(ShellOutput)` con el error POSIX apropiado si no procede.
-fn read_lines(state: &GameState, arg: &str) -> Result<Vec<String>, ShellOutput> {
+pub(crate) fn read_lines(state: &GameState, arg: &str) -> Result<Vec<String>, ShellOutput> {
     let comps = filesystem::normalize(&state.core.cwd, arg);
     match filesystem::read_file(&state.pentest().target.filesystem, &comps) {
         ReadOutcome::NotFound => Err(ShellOutput::code(
@@ -367,83 +367,6 @@ fn read_lines(state: &GameState, arg: &str) -> Result<Vec<String>, ShellOutput> 
             } else {
                 Ok(content)
             }
-        }
-    }
-}
-
-fn grep(state: &GameState, args: &[String]) -> ShellOutput {
-    if args.len() < 2 {
-        return ShellOutput::code(vec![String::from("usage: grep PATTERN FILE")], 2);
-    }
-    let pattern = &args[0];
-    let path = &args[1];
-    match read_lines(state, path) {
-        Err(mut e) => {
-            e.lines = e.lines.iter().map(|l| format!("grep: {l}")).collect();
-            e.exit = 2;
-            e
-        }
-        Ok(lines) => {
-            let hits: Vec<String> = lines
-                .into_iter()
-                .filter(|l| l.contains(pattern.as_str()))
-                .collect();
-            let exit = if hits.is_empty() { 1 } else { 0 };
-            ShellOutput::code(hits, exit)
-        }
-    }
-}
-
-/// `head`/`tail`: `-n N` opcional (por defecto 10). `head` = primeras, `tail` = últimas.
-fn head_tail(state: &GameState, verb: &str, args: &[String]) -> ShellOutput {
-    let mut n = 10usize;
-    let mut path: Option<&String> = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-n" {
-            if let Some(v) = it.next() {
-                n = v.parse().unwrap_or(10);
-            }
-        } else if let Some(v) = a.strip_prefix("-n") {
-            n = v.parse().unwrap_or(10);
-        } else {
-            path = Some(a);
-        }
-    }
-    let Some(path) = path else {
-        return ShellOutput::code(vec![format!("usage: {verb} [-n N] FILE")], 2);
-    };
-    match read_lines(state, path) {
-        Err(mut e) => {
-            e.lines = e.lines.iter().map(|l| format!("{verb}: {l}")).collect();
-            e
-        }
-        Ok(lines) => {
-            let out: Vec<String> = if verb == "head" {
-                lines.into_iter().take(n).collect()
-            } else {
-                let len = lines.len();
-                lines.into_iter().skip(len.saturating_sub(n)).collect()
-            };
-            ShellOutput::ok(out)
-        }
-    }
-}
-
-fn wc(state: &GameState, args: &[String]) -> ShellOutput {
-    let Some(path) = args.first() else {
-        return ShellOutput::code(vec![String::from("usage: wc FILE")], 2);
-    };
-    match read_lines(state, path) {
-        Err(mut e) => {
-            e.lines = e.lines.iter().map(|l| format!("wc: {l}")).collect();
-            e
-        }
-        Ok(lines) => {
-            let l = lines.len();
-            let w: usize = lines.iter().map(|s| s.split_whitespace().count()).sum();
-            let c: usize = lines.iter().map(|s| s.len() + 1).sum();
-            ShellOutput::ok(vec![format!("{l:>7} {w:>7} {c:>7} {path}")])
         }
     }
 }
@@ -474,7 +397,10 @@ fn file_cmd(state: &GameState, args: &[String]) -> ShellOutput {
 /// no es un comando de sistema emulado (el frontend probará otras vías).
 pub fn run(state: &mut GameState, verb: &str, args: &[String]) -> Option<ShellOutput> {
     // Los comandos que describen el host requieren una shell en él.
-    if needs_shell(verb) && !state.has_foothold() {
+    // En dominios con VFS libre (Bare/laboratorios no-pentest) la consola ya es
+    // el entorno operativo, así que estos comandos deben estar disponibles sin
+    // la mecánica de foothold.
+    if needs_shell(verb) && state.campaign.shell_for_vfs() && !state.has_foothold() {
         return Some(ShellOutput::not_found(verb));
     }
     let out = match verb {
@@ -488,9 +414,15 @@ pub fn run(state: &mut GameState, verb: &str, args: &[String]) -> Option<ShellOu
         "ip" => ip_cmd(state, args),
         "env" => env_cmd(state),
         "export" => export_cmd(state, args),
-        "grep" => grep(state, args),
-        "head" | "tail" => head_tail(state, verb, args),
-        "wc" => wc(state, args),
+        // Filtros de texto (grep, head, tail, wc, sort, uniq, nl, cat…): los
+        // implementa `shell`, que además soporta stdin en las tuberías. Aquí se
+        // invocan sin stdin (comando suelto que lee de un fichero-argumento).
+        v if crate::runtime::shell::is_filter(v) => {
+            match crate::runtime::shell::filter(state, v, args, None) {
+                Some(o) => o,
+                None => return None,
+            }
+        }
         "file" => file_cmd(state, args),
         _ => return None,
     };
@@ -578,6 +510,7 @@ mod tests {
                 target: host(),
                 network: vec![],
                 music: None,
+                autoplay: vec![],
             }],
         };
         GameState::new(campaign)
@@ -625,5 +558,15 @@ mod tests {
         let out = run(&mut g, "netstat", &[]).unwrap();
         assert_eq!(out.exit, 127);
         assert!(out.lines[0].contains("command not found"));
+    }
+
+    #[test]
+    fn sistema_funciona_en_vfs_libre_sin_foothold() {
+        let mut g = state();
+        g.campaign.features.shell_for_vfs = Some(false);
+
+        let out = run(&mut g, "env", &[]).unwrap();
+        assert_eq!(out.exit, 0);
+        assert!(out.lines.iter().any(|l| l == "APP_SECRET=s3cr3t"));
     }
 }

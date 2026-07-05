@@ -53,6 +53,7 @@ pub use runtime::actions;
 pub use runtime::core::CoreState;
 pub use runtime::state::{AchievementId, GameOutcome, GameState, Phase, ACHIEVEMENTS};
 pub use runtime::sysemu::{self, ShellOutput};
+pub use runtime::shell::{self, run_pipeline, PipelineResult};
 
 pub use asset::{AssetSource, DirAssetSource, MemAssetSource, NoAssets};
 pub use loader::{load_campaign, load_open_campaign, LoadError, OpenCampaign};

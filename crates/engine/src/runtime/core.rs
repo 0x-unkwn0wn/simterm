@@ -53,6 +53,18 @@ pub struct CoreState {
     /// Código de salida del último comando de shell (`$?`). No se persiste.
     pub last_exit: i32,
 
+    // ----- Verificación de trabajo real (por nivel) -----
+    /// Verbos que el jugador ha ejecutado en el nivel activo (en minúsculas, sin
+    /// duplicar). Lo alimenta el frontend en cada línea enviada. Permite exigir,
+    /// vía [`crate::model::command::CommandCondition::RanCommand`], que el alumno
+    /// haya usado de verdad una herramienta antes de avanzar. Se reinicia por nivel.
+    pub ran_commands: Vec<String>,
+    /// Rutas del VFS que el jugador ha leído en el nivel activo (con `cat`, y las
+    /// que produce/lee un pipeline). Permite exigir, vía
+    /// [`crate::model::command::CommandCondition::FileRead`], que el alumno haya
+    /// leído un fichero concreto antes de avanzar. Se reinicia por nivel.
+    pub read_paths: Vec<String>,
+
     // ----- Bookkeeping persistente de campaña (se guarda entre sesiones) -----
     /// Reloj acumulado de toda la campaña (para el resumen final).
     pub campaign_clock: u32,

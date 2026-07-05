@@ -302,15 +302,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::EngineBuiltin,
     },
     CommandSpec {
-        name: "exfil",
-        aliases: &[],
-        category: Category::Vfs,
-        summary: "Extrae el fichero objetivo y completa el nivel.",
-        usage: Some("exfil <ruta>"),
-        takes_args: true,
-        kind: CommandKind::EngineBuiltin,
-    },
-    CommandSpec {
         name: "find",
         aliases: &[],
         category: Category::Vfs,
@@ -319,10 +310,22 @@ pub const COMMANDS: &[CommandSpec] = &[
         takes_args: true,
         kind: CommandKind::EngineBuiltin,
     },
+    // `exfil` (extraer el objetivo + completar el nivel) y `loot` (botín pentest)
+    // operan sobre el VFS pero son mecánica de intrusión, no exploración neutral:
+    // van en una categoría pentest para que se oculten/degraden fuera del dominio.
+    CommandSpec {
+        name: "exfil",
+        aliases: &[],
+        category: Category::Findings,
+        summary: "Extrae el fichero objetivo y completa el nivel.",
+        usage: Some("exfil <ruta>"),
+        takes_args: true,
+        kind: CommandKind::EngineBuiltin,
+    },
     CommandSpec {
         name: "loot",
         aliases: &["creds"],
-        category: Category::Vfs,
+        category: Category::Findings,
         summary: "Muestra el botín recogido.",
         usage: None,
         takes_args: false,
@@ -414,8 +417,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "grep",
         aliases: &[],
         category: Category::System,
-        summary: "Filtra líneas de un fichero por patrón.",
-        usage: Some("grep PATRÓN <ruta>"),
+        summary: "Filtra líneas por patrón (de un fichero o de la tubería).",
+        usage: Some("grep PATRÓN [ruta]   ·   ... | grep PATRÓN"),
         takes_args: true,
         kind: CommandKind::EngineBuiltin,
     },
@@ -423,8 +426,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "head",
         aliases: &[],
         category: Category::System,
-        summary: "Primeras líneas de un fichero.",
-        usage: Some("head [-n N] <ruta>"),
+        summary: "Primeras líneas (de un fichero o de la tubería).",
+        usage: Some("head [-n N] [ruta]"),
         takes_args: true,
         kind: CommandKind::EngineBuiltin,
     },
@@ -432,8 +435,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "tail",
         aliases: &[],
         category: Category::System,
-        summary: "Últimas líneas de un fichero.",
-        usage: Some("tail [-n N] <ruta>"),
+        summary: "Últimas líneas (de un fichero o de la tubería).",
+        usage: Some("tail [-n N] [ruta]"),
         takes_args: true,
         kind: CommandKind::EngineBuiltin,
     },
@@ -441,8 +444,35 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "wc",
         aliases: &[],
         category: Category::System,
-        summary: "Cuenta líneas/palabras/bytes de un fichero.",
-        usage: Some("wc <ruta>"),
+        summary: "Cuenta líneas/palabras/bytes (fichero o tubería). Admite -l/-w/-c.",
+        usage: Some("wc [-l|-w|-c] [ruta]   ·   ... | wc -l"),
+        takes_args: true,
+        kind: CommandKind::EngineBuiltin,
+    },
+    CommandSpec {
+        name: "sort",
+        aliases: &[],
+        category: Category::System,
+        summary: "Ordena líneas (fichero o tubería). Admite -r (inverso), -u (únicas).",
+        usage: Some("sort [-r] [-u] [ruta]   ·   ... | sort"),
+        takes_args: true,
+        kind: CommandKind::EngineBuiltin,
+    },
+    CommandSpec {
+        name: "uniq",
+        aliases: &[],
+        category: Category::System,
+        summary: "Colapsa líneas repetidas adyacentes. Admite -c (cuenta).",
+        usage: Some("... | sort | uniq   ·   ... | sort | uniq -c"),
+        takes_args: true,
+        kind: CommandKind::EngineBuiltin,
+    },
+    CommandSpec {
+        name: "nl",
+        aliases: &[],
+        category: Category::System,
+        summary: "Numera las líneas (fichero o tubería).",
+        usage: Some("nl [ruta]   ·   ... | nl"),
         takes_args: true,
         kind: CommandKind::EngineBuiltin,
     },
@@ -770,9 +800,26 @@ mod tests {
         let generic = all_verbs_for(false);
         assert!(generic.contains(&"help")); // genérico
         assert!(generic.contains(&"ls")); // VFS genérico
+        assert!(generic.contains(&"cat")); // VFS genérico
         assert!(!generic.contains(&"nmap")); // pentest fuera
         assert!(!generic.contains(&"exploit"));
         assert!(!generic.contains(&"nikto")); // herramienta de enumeración fuera
+        assert!(!generic.contains(&"exfil")); // mecánica pentest sobre el VFS
+        assert!(!generic.contains(&"loot"));
+        assert!(!generic.contains(&"creds")); // alias de loot
+    }
+
+    #[test]
+    fn ayuda_no_pentest_oculta_exfil_y_botin() {
+        let generico = reference_lines(false).join("\n");
+        assert!(!generico.contains("exfil"), "exfil no debe salir en la ayuda de un dominio no-pentest");
+        assert!(!generico.contains("loot"));
+        assert!(generico.contains("ls")); // el VFS neutral sí se lista
+
+        // En el dominio pentest siguen presentes.
+        let pentest = reference_lines(true).join("\n");
+        assert!(pentest.contains("exfil"));
+        assert!(pentest.contains("loot"));
     }
 
     #[test]

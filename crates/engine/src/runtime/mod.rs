@@ -5,6 +5,7 @@ pub mod balance;
 pub mod core;
 pub mod meter;
 pub mod probability;
+pub mod shell;
 pub mod state;
 pub mod sysemu;
 

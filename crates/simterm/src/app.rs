@@ -13,6 +13,7 @@ use crate::autoplay::{Autoplay, AutoplayConfig, AutoplayMode};
 use crate::command::{self, Command};
 use crate::completion::{self, Completion};
 use crate::effects::{Effect, EffectKind};
+use crate::palette::Palette;
 
 mod info;
 mod minigames;
@@ -58,12 +59,15 @@ pub struct App {
     audio: Option<Audio>,
     /// Autoplayer visible: si está activo, juega la campaña solo, paso a paso.
     autoplay: Option<Autoplay>,
+    /// Paleta activa de la interfaz (preferencia del jugador). Se cicla en vivo
+    /// con F2; la lee `ui::draw` en cada frame.
+    pub palette: Palette,
 }
 
 impl App {
     /// Construye la aplicación a partir de una campaña ya cargada y un subsistema
     /// de audio opcional (la música por misión; `None` = silencio).
-    pub fn new(campaign: Campaign, audio: Option<Audio>) -> Self {
+    pub fn new(campaign: Campaign, audio: Option<Audio>, palette: Palette) -> Self {
         // Si hay progreso guardado, reanuda la campaña en su nivel antes de
         // construir el briefing de arranque.
         let mut game = GameState::new(campaign);
@@ -96,6 +100,7 @@ impl App {
             tick_accum: Duration::ZERO,
             audio,
             autoplay: None,
+            palette,
         };
         // Tras el arranque, el briefing de la operación activa (1ª o reanudada).
         let brief = app.briefing_effect(start_level);
@@ -226,9 +231,22 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // AltGr (teclados ES/EU) llega como CONTROL+ALT y produce caracteres
+        // imprimibles como '|', '@', '#', '~', '\\', '{', '}', '[', ']'. NO es un
+        // atajo Ctrl: si ambos modificadores están, es entrada de texto normal.
+        let ctrl_chord = key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
+
         // Ctrl-C siempre sale.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if ctrl_chord && key.code == KeyCode::Char('c') {
             self.game.core.running = false;
+            return;
+        }
+
+        // F2 cicla la paleta en vivo. Va antes del salto de animación para que
+        // el jugador pueda cambiar el aspecto también durante los overlays.
+        if key.code == KeyCode::F(2) {
+            self.palette = self.palette.next();
             return;
         }
 
@@ -238,8 +256,9 @@ impl App {
             return;
         }
 
-        // Atajos estilo readline con Ctrl (edición de la línea de comando).
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Atajos estilo readline con Ctrl (edición de la línea de comando). No se
+        // aplican con AltGr (CONTROL+ALT), que produce texto (ver `ctrl_chord`).
+        if ctrl_chord {
             match key.code {
                 KeyCode::Char('a') => self.cursor = 0,
                 KeyCode::Char('e') => self.cursor = self.input_len(),
@@ -435,17 +454,31 @@ impl App {
     /// inyectada por el autoplayer). El eco, el historial y las transiciones son
     /// idénticos en ambos casos.
     fn submit_line(&mut self, raw: String) {
-        let cmd = command::parse(&raw, self.game.campaign.kill_chain());
         self.hist_pos = None;
+        let trimmed = raw.trim().to_string();
+
+        // Una línea con tubería (`|`) o redirección (`>`/`>>`) no la parsea el
+        // parser de un solo comando: la ejecuta el motor de shell (`run_pipeline`).
+        let is_pipeline = !trimmed.is_empty() && simterm_engine::shell::is_pipeline(&trimmed);
+        let cmd = if is_pipeline {
+            Command::Empty // marcador: el despacho real es el pipeline
+        } else {
+            command::parse(&raw, self.game.campaign.kill_chain())
+        };
 
         // El eco del comando se registra con el prompt (excepto entrada vacía).
-        if cmd != Command::Empty {
-            let trimmed = raw.trim().to_string();
+        if !trimmed.is_empty() && (is_pipeline || cmd != Command::Empty) {
             let prompt = self.game.prompt();
             self.game.log(format!("{prompt}{trimmed}"));
             // Se guarda en el historial evitando duplicar el último.
             if self.history.last().map(|s| s.as_str()) != Some(trimmed.as_str()) {
-                self.history.push(trimmed);
+                self.history.push(trimmed.clone());
+            }
+            // Verificación de trabajo real: registra cada verbo ejecutado en el
+            // nivel (para las condiciones `RanCommand`). Cubre cada etapa de un
+            // pipeline (`grep ... | wc`) y los redirigidos (`... > f`).
+            for verb in command::verbs_in_line(&trimmed) {
+                self.game.record_command(&verb);
             }
         }
 
@@ -456,12 +489,32 @@ impl App {
         let prev_level = self.game.level_index;
         let prev_outcome = self.game.core.outcome;
 
-        self.dispatch(cmd);
+        if is_pipeline {
+            self.run_pipeline_line(&trimmed);
+        } else {
+            self.dispatch(cmd);
+        }
 
         self.trigger_transition(prev_level, prev_outcome);
 
         // Si el comando cambió de misión (o reinició), ajusta la música.
         self.sync_audio();
+    }
+
+    /// Ejecuta una línea con tubería/redirección delegando en el motor de shell,
+    /// y refleja su salida y código de retorno (`$?`). Respeta el fin de partida.
+    fn run_pipeline_line(&mut self, line: &str) {
+        if self.game.is_over() {
+            self.game.log(String::from(
+                "La partida ha terminado. Escribe 'quit' para salir.",
+            ));
+            return;
+        }
+        let result = simterm_engine::run_pipeline(&mut self.game, line);
+        for l in result.lines {
+            self.game.log(l);
+        }
+        self.game.core.last_exit = result.exit;
     }
 
     /// Dispara la animación adecuada si el comando cambió de operación o terminó

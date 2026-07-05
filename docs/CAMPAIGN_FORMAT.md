@@ -209,12 +209,48 @@ commands: [
 | `lines` | string list | `[]` | Lines printed to the log. `{clock}` is substituted. |
 | `effects` | `CommandEffect` list | `[]` | Ordered effects applied to game state. |
 | `conditions` | `CommandCondition` list | `[]` | All must hold for the command to be available. |
+| `locked` | string list | `[]` | Lines shown when the command is *in scope* but its **work gates** (`FileRead`/`RanCommand`) aren't met. See [Availability](#availability-scope-vs-work-gates). |
 | `hidden` | bool | `false` | If `true`, omitted from `help` and autocomplete (still runnable). |
 
 If a verb's `conditions` are not met, it is treated as unrecognized and falls
 through to easter eggs / the unknown-command message, so a command can appear and
 disappear with state. Built-in verbs still take priority over campaign commands,
 and campaign commands take priority over easter eggs with the same trigger.
+
+### Availability: scope vs. work gates
+
+Conditions split into two kinds, which changes what a *failed* condition does:
+
+- **Scope** conditions — `Mission`, `Phase`, `FlagSet`, `FlagNotSet` — decide
+  whether the command is in play at all. If one fails, the verb is treated as
+  unrecognized (falls through), exactly as before.
+- **Work gates** — `FileRead`, `RanCommand` — verify the player actually *did*
+  the exercise (read a file, ran a tool). If every scope condition holds but a
+  work gate fails, the command is **locked**: it prints its `locked` lines (a
+  hint about what's still missing) **followed by an auto-generated checklist** of
+  every work gate, each marked `[✓]` if already satisfied or `[ ]` if still
+  pending — so the player sees at a glance what's done and what's left. The
+  checklist is emitted even when `locked` is empty, so a work-gated command never
+  silently falls through.
+
+This lets a teaching campaign gate a "deliver this level" verb on real work and
+still give a helpful "not yet — do X first" message rather than a cryptic
+`command not found`:
+
+```ron
+(
+    triggers: ["entregar-filtros"],
+    conditions: [
+        Mission("nivel-2"),            // scope: only in this level
+        FileRead("/pistas/filtros.md"), // work: must have read the hint
+        RanCommand("grep"),             // work: must have used grep
+        RanCommand("wc"),               // work: must have used wc
+    ],
+    locked: ["Aún no: lee la pista y cuenta con 'grep ... | wc -l'."],
+    lines: ["Entrega aceptada."],
+    effects: [CompleteMission],
+),
+```
 
 ### Effects (`CommandEffect`)
 
@@ -235,18 +271,48 @@ close a mission only when the player has done something specific.
 
 ### Conditions (`CommandCondition`)
 
-| Condition | Available when |
-|---|---|
-| `FlagSet("name")` | The named flag is active. |
-| `FlagNotSet("name")` | The named flag is not active. |
-| `Mission("mission-id")` | The current mission has that `Mission.id`. |
-| `Phase("post")` | The current stage is at least the named one. Names are matched against `Campaign.stages` (case-insensitive); with the default stages that means `recon`, `enum`, `exploit`, or `post`. |
+| Condition | Kind | Available when |
+|---|---|---|
+| `FlagSet("name")` | scope | The named flag is active. |
+| `FlagNotSet("name")` | scope | The named flag is not active. |
+| `Mission("mission-id")` | scope | The current mission has that `Mission.id`. |
+| `Phase("post")` | scope | The current stage is at least the named one. Names are matched against `Campaign.stages` (case-insensitive); with the default stages that means `recon`, `enum`, `exploit`, or `post`. |
+| `FileRead("/path")` | work | The player has read that VFS path **in the current level** (with `cat`, or as a file produced/read in a pipeline). Reset each level. |
+| `RanCommand("grep")` | work | The player has executed that verb **in the current level** (case-insensitive; each stage of a pipeline counts). Reset each level. |
+
+`FileRead` and `RanCommand` are **work gates** — they verify the player actually
+did the exercise. See [Availability](#availability-scope-vs-work-gates) for how a
+failed work gate produces a `locked` hint instead of falling through. A common
+pattern is to gate a delivery on a *produced* file — e.g.
+`FileRead("/tmp/out.txt")` where `/tmp/out.txt` only exists after the player runs
+`... > /tmp/out.txt` and reads it — which forces a real redirection. (`--doctor`
+warns that such a path is not in any static VFS; that warning is expected here.)
 
 ## Terminal Emulation (`env`, `processes`, `TerminalCommand`)
 
 SimTerm emulates a realistic shell. Most system commands are **synthesized** from
 the host you already defined, so you rarely author their output. Shell output is
 authentic POSIX (English); narrative text still uses the campaign `language`.
+
+### Pipes and redirection
+
+The shell runs **pipelines** (`|`) and **output redirection** (`>`, `>>`) for
+real, so a lesson can be *practiced*, not just described. Any line containing `|`
+or `>` is executed by the pipeline engine instead of the single-command parser.
+
+- **Pipes**: the stdout of each stage becomes the stdin of the next. The filters
+  that read stdin (or a file argument) are `cat`, `grep`, `head`, `tail`, `wc`,
+  `sort`, `uniq`, `nl`, `echo`, plus `ls` and `find` as sources. Example:
+  `grep ERROR /logs/app.log | wc -l`.
+- **Redirection**: `cmd > file` overwrites, `cmd >> file` appends. The target is
+  written into the mission's VFS (its parent directory must exist; it is not a
+  `mkdir -p`), so a later `cat` reads it back. Redirection is per-mission: writes
+  don't persist across levels. `root`, encoded, or binary files are not
+  overwritten.
+
+Because a redirected file is a real VFS file afterward, `FileRead("/path")` on it
+is how you verify the player performed the redirection (see
+[Conditions](#conditions-commandcondition)).
 
 ### `env` and `$VAR`
 
@@ -371,6 +437,7 @@ Mission(
     debrief: ["Debrief text"],
     entry: Active,
     endings: [ Ending(...) ],
+    autoplay: ["cat /objetivos/checklist.txt", "entregar"],
     target: ( ... ),
     network: [ NetHost(...) ],
 )
@@ -391,6 +458,7 @@ Mission(
 | `debrief` | string list | `[]` | Text shown after mission completion. |
 | `entry` | `EntryVector` | `Active` | Opening mission state. |
 | `endings` | `Ending` list | `[]` | Branching ending choices, usually on the final mission. |
+| `autoplay` | string list | `[]` | Optional command script for `--autoplay` in data-driven missions. If omitted, non-pentest campaigns use a conservative declarative-command heuristic. |
 | `target` | `TargetNode` | empty | Single-host target. |
 | `network` | `NetHost` list | `[]` | Multi-host network. If present, `target` is ignored. |
 | `music` | optional string | `None` | WAV path (relative to the campaign) for this mission's track. See [Music](#music-optional). |
@@ -699,6 +767,7 @@ It exits non-zero if there are any **errors**. It reports at least:
 - Declarative-command effects/conditions that reference a missing achievement or
   mission, a `Phase`/`ReachStage` name not in `stages`, or an `AddMeter` id not
   declared in any mission.
+- An empty `RanCommand("")` work gate (the player could never satisfy it).
 - Duplicate or empty meter ids within a mission.
 
 **Warnings** (smell wrong, still load):
@@ -709,6 +778,9 @@ It exits non-zero if there are any **errors**. It reports at least:
 - Easter eggs, declarative commands, or terminal commands whose triggers collide
   with built-in/system commands (they would be shadowed) or with each other.
 - Achievement `ReadFile` triggers whose path is not in any VFS.
+- `FileRead(...)` work gates whose path is not in any static VFS (expected when
+  the file is produced at runtime by a redirection).
+- `RanCommand(...)` work gates whose verb is not a known command.
 - Declarative `FlagSet(...)` conditions for a flag no command ever sets.
 - `TerminalCommand.exit` outside `0..=255`, or `{env:NAME}` templates referencing
   a variable that is neither in `env` nor derived.

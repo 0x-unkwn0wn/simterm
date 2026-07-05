@@ -130,7 +130,7 @@ fn arg_candidates(state: &GameState, verb: &str, frag: &str) -> Vec<String> {
 }
 
 fn path_candidates(state: &GameState, frag: &str) -> Vec<String> {
-    if !state.has_foothold() {
+    if state.campaign.shell_for_vfs() && !state.has_foothold() {
         return Vec::new();
     }
     // Se separa el fragmento en "base" (hasta la última '/') y "hoja".
@@ -258,6 +258,23 @@ mod tests {
     fn sin_candidatos_no_hace_nada() {
         let g = game();
         assert!(matches!(complete(&g, "zzzz"), Completion::None));
+    }
+
+    #[test]
+    fn completa_rutas_en_campanas_bare_con_vfs_libre() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("demo_orbita");
+        let g = GameState::new(load_campaign(path).expect("la campaña Bare debe cargar"));
+
+        assert!(!g.campaign.shell_for_vfs());
+        assert!(!g.has_foothold());
+        match complete(&g, "cat b") {
+            Completion::Replace(s) => assert_eq!(s, "cat bitacora.log "),
+            _ => panic!("esperaba completar una ruta sin foothold"),
+        }
     }
 
     #[test]

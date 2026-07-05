@@ -28,6 +28,14 @@ pub struct CampaignCommand {
     /// desconocido), de modo que el comando puede aparecer/desaparecer por estado.
     #[serde(default)]
     pub conditions: Vec<CommandCondition>,
+    /// Líneas mostradas cuando el comando PERTENECE al momento actual (sus
+    /// condiciones de *alcance* —`Mission`, `Phase`, flags— se cumplen) pero
+    /// fallan sus condiciones de **trabajo real** (`FileRead`, `RanCommand`). En
+    /// vez de un críptico "command not found", el jugador ve por qué aún no puede
+    /// entregar (p. ej. "primero lee la pista y ejecuta grep"). Si está vacío, un
+    /// comando bloqueado cae a "desconocido" como antes. `{clock}` se sustituye.
+    #[serde(default)]
+    pub locked: Vec<String>,
     /// Si es `true`, el comando no se muestra en la ayuda ni en el autocompletado
     /// (verbo secreto). Sigue siendo ejecutable.
     #[serde(default)]
@@ -72,6 +80,16 @@ pub enum CommandCondition {
     /// `Campaign.stages`, sin distinguir mayúsculas). Por defecto (kill chain):
     /// `"recon"`, `"enum"`, `"exploit"` o `"post"`.
     Phase(String),
+    /// El jugador ha leído esta ruta del VFS en el nivel actual (con `cat` o vía
+    /// un pipeline). Verificación de trabajo real: exige haber CONSULTADO un
+    /// fichero (una pista, un dataset) antes de avanzar. La ruta se compara ya
+    /// normalizada (absoluta, p. ej. `"/pistas/globs.md"`).
+    FileRead(String),
+    /// El jugador ha ejecutado este verbo en el nivel actual (p. ej. `"grep"`,
+    /// `"find"`). Verificación de trabajo real: exige haber USADO de verdad una
+    /// herramienta antes de reclamar el nivel. Se compara sin distinguir
+    /// mayúsculas.
+    RanCommand(String),
 }
 
 impl CommandCondition {

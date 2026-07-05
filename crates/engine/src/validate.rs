@@ -520,6 +520,38 @@ pub fn validate_campaign(campaign: &Campaign, reserved_verbs: &[&str]) -> Valida
                     }
                 }
                 CommandCondition::FlagNotSet(_) => {}
+                CommandCondition::FileRead(path) => {
+                    // La ruta debería existir en algún VFS de la campaña (salvo
+                    // que la produzca una redirección en tiempo de ejecución, de
+                    // ahí que sea aviso y no error).
+                    let exists = campaign.missions.iter().any(|m| {
+                        hosts_of(m)
+                            .iter()
+                            .any(|(host, _)| vfs_has_file(&host.filesystem, path))
+                    });
+                    if !exists {
+                        report.warn(
+                            &loc,
+                            format!(
+                                "la condición FileRead('{}') apunta a una ruta que no existe en ningún VFS (¿la crea una redirección?)",
+                                path
+                            ),
+                        );
+                    }
+                }
+                CommandCondition::RanCommand(verb) => {
+                    if verb.trim().is_empty() {
+                        report.error(&loc, "la condición RanCommand('') está vacía");
+                    } else if !reserved.contains(verb.as_str()) {
+                        report.warn(
+                            &loc,
+                            format!(
+                                "la condición RanCommand('{}') no es un comando conocido: el alumno nunca podrá cumplirla",
+                                verb
+                            ),
+                        );
+                    }
+                }
             }
         }
     }
@@ -688,6 +720,7 @@ mod tests {
             target: host,
             network: vec![],
             music: None,
+            autoplay: vec![],
         }
     }
 
@@ -804,6 +837,7 @@ mod tests {
                 CommandCondition::Phase(String::from("orbit")),
             ],
             hidden: false,
+            locked: vec![],
         });
         let report = validate_campaign(&camp, &[]);
         let joined = report

@@ -139,4 +139,10 @@ pub struct Mission {
     /// presentación: el motor no reproduce audio, solo transporta el dato.
     #[serde(default)]
     pub music: Option<String>,
+    /// Guion opcional para el autoplayer genérico. Cada entrada es una línea de
+    /// comando que el frontend inyecta como si la hubiera tecleado el jugador.
+    /// Si está vacío, los dominios no-pentest pueden usar una heurística basada
+    /// en comandos declarativos.
+    #[serde(default)]
+    pub autoplay: Vec<String>,
 }
